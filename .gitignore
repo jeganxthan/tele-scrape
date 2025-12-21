@@ -1,0 +1,76 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# C extensions
+*.so
+
+# Virtual environments
+.venv/
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+myenv/
+
+# Environment variables
+.env
+.env.*
+
+# Jupyter Notebook checkpoints
+.ipynb_checkpoints
+
+# Pytest and coverage reports
+.coverage
+coverage.*
+.cache
+nosetests.xml
+test_*.log
+htmlcov/
+.tox/
+
+# Django/Migrations
+*.log
+local_settings.py
+db.sqlite3
+media/
+
+# Flask
+instance/
+*.db
+
+# SQLAlchemy
+*.sqlite3
+
+# MyPy
+.mypy_cache/
+.dmypy.json
+dmypy.json
+
+# PyInstaller
+*.manifest
+*.spec
+dist/
+build/
+
+# Unit test / coverage reports
+junit-*.xml
+
+# VS Code
+.vscode/
+
+# macOS
+.DS_Store
+
+# Linux
+*~
+
+# Windows
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+
+/downloads
