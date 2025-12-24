@@ -167,6 +167,76 @@ class SubtitleGenerator:
             print(f"⚠️ {error_msg}")
             return False, None, error_msg
     
+    def burn_subtitles(
+        self,
+        video_path: str,
+        subtitle_path: str,
+        progress_callback: Optional[callable] = None
+    ) -> Tuple[bool, Optional[str], Optional[str]]:
+        """
+        Burn subtitles into the video file permanently using ffmpeg.
+        
+        Args:
+            video_path: Path to the video file
+            subtitle_path: Path to the subtitle file
+            progress_callback: Optional callback for progress updates
+            
+        Returns:
+            Tuple of (success: bool, output_path: str or None, error_message: str or None)
+        """
+        if not os.path.exists(video_path):
+            return False, None, f"Video file not found: {video_path}"
+        if not os.path.exists(subtitle_path):
+            return False, None, f"Subtitle file not found: {subtitle_path}"
+            
+        if not self._check_ffmpeg():
+            return False, None, "ffmpeg is not installed."
+
+        # Create output path (temporary file)
+        base, ext = os.path.splitext(video_path)
+        output_path = f"{base}_burned{ext}"
+        
+        try:
+            # Escape paths for ffmpeg filter
+            # Windows paths need special handling, but we are on Linux
+            # For filter_complex, we need to escape colons and backslashes if any
+            sub_path_escaped = subtitle_path.replace(":", "\\:").replace("'", "'\\\\''")
+            
+            cmd = [
+                "ffmpeg",
+                "-y",  # Overwrite output
+                "-i", video_path,
+                "-vf", f"subtitles='{sub_path_escaped}'",
+                "-c:a", "copy",  # Copy audio without re-encoding
+                output_path
+            ]
+            
+            print(f"🔥 Burning subtitles into: {os.path.basename(video_path)}")
+            if progress_callback:
+                progress_callback("Burning subtitles (this may take a while)...")
+                
+            # Run ffmpeg
+            process = subprocess.run(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True
+            )
+            
+            if process.returncode != 0:
+                return False, None, f"ffmpeg failed: {process.stderr}"
+                
+            # Replace original file with burned file
+            os.replace(output_path, video_path)
+            print(f"✅ Subtitles burned successfully into: {os.path.basename(video_path)}")
+            
+            return True, video_path, None
+            
+        except Exception as e:
+            if os.path.exists(output_path):
+                os.remove(output_path)
+            return False, None, f"Failed to burn subtitles: {str(e)}"
+
     def generate_subtitles_batch(
         self,
         video_paths: list,

@@ -251,10 +251,27 @@ async def process_message(client, msg, semaphore, series_data, downloaded_episod
                             if success:
                                 print(f"✅ Subtitles generated: {os.path.basename(subtitle_path)}")
                                 info["subtitle_file"] = os.path.basename(subtitle_path)
+                                
+                                # Burn subtitles
+                                print(f"🔥 Starting subtitle burn for '{full_file_name}'...")
+                                burn_success, burned_path, burn_error = await asyncio.to_thread(
+                                    generator.burn_subtitles, file_path, subtitle_path
+                                )
+                                if burn_success:
+                                    print(f"✅ Subtitles burned successfully.")
+                                    # Delete the subtitle file
+                                    try:
+                                        os.remove(subtitle_path)
+                                        print(f"🗑️ Deleted subtitle file: {os.path.basename(subtitle_path)}")
+                                    except Exception as e:
+                                        print(f"⚠️ Failed to delete subtitle file: {e}")
+                                else:
+                                    print(f"⚠️ Subtitle burn failed: {burn_error}")
+                                    
                             else:
                                 print(f"⚠️ Subtitle generation failed: {error}")
                         except Exception as e:
-                            print(f"⚠️ Subtitle generation error: {e}")
+                            print(f"⚠️ Subtitle generation/burning error: {e}")
                     
                     try:
                         await msg.delete()
