@@ -1,3 +1,4 @@
+
 # server.py
 import json
 import time
@@ -167,14 +168,37 @@ def attach_local_subtitles(data: dict, download_dir: str) -> dict:
 
 # ---------------- FileMoon upload utilities (unchanged) -----------------
 def extract_info_from_filename(filename):
-    """Extracts series, season, and episode from a filename like 'Breaking_Bad_S01E01.mkv' or .mp4."""
-    info = {}
-    # Support multiple video extensions
-    match = re.match(r"^(.*?)_S(\d+)E(\d+)\.(mkv|mp4|avi|mov)$", filename, re.IGNORECASE)
-    if match:
-        info["series"] = match.group(1).replace('_', ' ').strip()
-        info["season_number"] = int(match.group(2))
-        info["episode_number"] = int(match.group(3))
+    """
+    Extracts series, season, and episode from various filename formats.
+    Supported:
+      - Series_Name_S01E01.mp4
+      - Series Name 1.mp4 (mapped to Episode 1)
+      - Series_Name_Part_1.mp4
+    """
+    info = {"series": None, "season_number": 1, "episode_number": 0}
+    
+    # Format 1: Series_S01E01
+    match1 = re.search(r"^(.*?)_S(\d+)E(\d+)", filename, re.IGNORECASE)
+    if match1:
+        info["series"] = match1.group(1).replace('_', ' ').strip()
+        info["season_number"] = int(match1.group(2))
+        info["episode_number"] = int(match1.group(3))
+        return info
+        
+    # Format 2: Series Episode 1
+    match2 = re.search(r"^(.*?)\s+(?:Episode|Ep)\s*(\d+)", filename, re.IGNORECASE)
+    if match2:
+        info["series"] = match2.group(1).replace('_', ' ').strip()
+        info["episode_number"] = int(match2.group(2))
+        return info
+
+    # Format 3: Series 1 (generic fallback)
+    match3 = re.search(r"^(.*?)\s+(\d+)\.(mkv|mp4|avi|mov)$", filename, re.IGNORECASE)
+    if match3:
+        info["series"] = match3.group(1).replace('_', ' ').strip()
+        info["episode_number"] = int(match3.group(2))
+        return info
+        
     return info
 
 def upload_progress_callback(current, total, file_name):
@@ -224,29 +248,48 @@ async def upload_local_files_to_filemoon():
         print(f"Download dir '{DOWNLOAD_DIR}' does not exist.")
         return {"status": "success", "uploaded_count": 0, "failed_uploads": [], "csv_report": None}
 
-    for series_folder in sorted(os.listdir(DOWNLOAD_DIR)):
-        series_path = os.path.join(DOWNLOAD_DIR, series_folder)
-        if not os.path.isdir(series_path):
-            continue
-        series_name = series_folder.replace('_', ' ').strip()
-        season_folders = [f for f in os.listdir(series_path) if os.path.isdir(os.path.join(series_path, f)) and f.lower().startswith("season")]
-        season_folders.sort(key=lambda x: int(re.search(r'(\d+)', x).group(1)))
-        for season_folder in season_folders:
-            season_path = os.path.join(series_path, season_folder)
-            # Support multiple video formats: .mkv, .mp4, .avi, .mov
-            episode_files = [f for f in os.listdir(season_path) if f.lower().endswith((".mkv", ".mp4", ".avi", ".mov", ".srt"))]
-            episode_files.sort(key=lambda x: extract_info_from_filename(x).get("episode_number", 0))
-            for filename in episode_files:
-                local_file_path = os.path.join(season_path, filename)
-                remote_ftp_dir = os.path.join("/", series_name, season_folder)
+    # Recursive walk through DOWNLOAD_DIR
+    for root, dirs, files in os.walk(DOWNLOAD_DIR):
+        for filename in files:
+            if filename.lower().endswith((".mkv", ".mp4", ".avi", ".mov", ".srt")):
+                local_file_path = os.path.join(root, filename)
+                
+                # Determine remote path based on directory structure relative to DOWNLOAD_DIR
+                relative_path = os.path.relpath(root, DOWNLOAD_DIR)
+                
+                if relative_path == ".":
+                     # File is directly in downloads/, try to infer series from filename
+                     info = extract_info_from_filename(filename)
+                     series_name = info.get("series") or "Unsorted"
+                     remote_ftp_dir = os.path.join("/", series_name)
+                     season_name = "General"
+                else:
+                    # Folder structure: Series/Season/Episode
+                    path_parts = relative_path.split(os.sep)
+                    series_name = path_parts[0].replace('_', ' ').strip()
+                    remote_ftp_dir = os.path.join("/", *path_parts)
+                    season_name = path_parts[-1]
+                
                 remote_ftp_path = os.path.join(remote_ftp_dir, filename)
+                
+                print(f"DEBUG: Found file {filename} in {relative_path}. Remote path will be {remote_ftp_path}")
+                
                 files_to_upload.append({
                     "local_path": local_file_path,
                     "remote_path": remote_ftp_path,
                     "filename": filename,
                     "series": series_name,
-                    "season": season_folder
+                    "season": season_name
                 })
+    
+    # Sort files to ensure logical upload order
+    files_to_upload.sort(key=lambda x: (x["series"], x["filename"]))
+    
+    print(f"Found {len(files_to_upload)} files to process recursively.")
+
+    if uploaded_count > 0:
+        print("Waiting 10 seconds for FileMoon to index files before updating CSV...")
+        await asyncio.sleep(10)
 
     print(f"Found {len(files_to_upload)} files to process.")
 
@@ -307,31 +350,78 @@ async def generate_filemoon_csv():
         print(f"❌ Failed to generate CSV: {e}")
         return None
 
+def fetch_all_files_recursively(folder_id=None):
+    """
+    Recursively fetch all files from FileMoon starting from folder_id.
+    If folder_id is None, starts from root.
+    """
+    all_files = []
+    
+    # 1. Fetch files in current folder (with pagination)
+    page = 1
+    while True:
+        try:
+            # f_list arguments: fld_id, name, created, public, per_page, page
+            response = filemoon_client.f_list(
+                fld_id=str(folder_id) if folder_id else None, 
+                per_page="100", 
+                page=str(page)
+            )
+            
+            if not response or 'result' not in response or 'files' not in response['result']:
+                break
+            
+            files = response['result']['files']
+            if not files:
+                break
+                
+            all_files.extend(files)
+            
+            # If we got fewer than 100 results, we've reached the last page for this folder
+            if len(files) < 100:
+                break
+            page += 1
+        except Exception as e:
+            print(f"⚠️ Error fetching files for folder {folder_id} page {page}: {e}")
+            break
+
+    # 2. Fetch subfolders and recurse
+    try:
+        response_folders = filemoon_client.fld_list(fld_id=str(folder_id) if folder_id else None)
+        if response_folders and 'result' in response_folders and 'folders' in response_folders['result']:
+            folders = response_folders['result']['folders']
+            for folder in folders:
+                # API might return 'id' or 'fld_id', checking both just in case
+                f_id = folder.get('id') or folder.get('fld_id')
+                f_name = folder.get('name', 'Unknown')
+                if f_id:
+                     print(f"   📂 Recursing into folder: '{f_name}' (ID: {f_id})")
+                     sub_files = fetch_all_files_recursively(f_id)
+                     all_files.extend(sub_files)
+    except Exception as e:
+         print(f"⚠️ Error fetching subfolders for folder {folder_id}: {e}")
+
+    return all_files
+
 def _write_csv_sync(filename):
     with open(filename, mode='w', newline='', encoding='utf-8') as csv_file:
         fieldnames = ['file_code', 'title', 'file_size', 'uploaded', 'status', 'public']
         writer = csv.DictWriter(csv_file, fieldnames=fieldnames)
         writer.writeheader()
-        page = 1
-        while True:
-            response = filemoon_client.f_list(per_page="100", page=str(page))
-            if not response or 'result' not in response or 'files' not in response['result']:
-                break
-            files = response['result']['files']
-            if not files:
-                break
-            for file_data in files:
-                writer.writerow({
-                    'file_code': file_data.get('file_code', ''),
-                    'title': file_data.get('title', ''),
-                    'file_size': file_data.get('file_size', ''),
-                    'uploaded': file_data.get('uploaded', ''),
-                    'status': file_data.get('status', ''),
-                    'public': file_data.get('public', '')
-                })
-            if len(files) < 100:
-                break
-            page += 1
+        
+        print("   ⏳ Fetching complete file list from FileMoon (this may take a moment)...")
+        all_files = fetch_all_files_recursively(folder_id=None)
+        
+        print(f"   📝 Writing {len(all_files)} files to CSV...")
+        for file_data in all_files:
+            writer.writerow({
+                'file_code': file_data.get('file_code', ''),
+                'title': file_data.get('title', ''),
+                'file_size': file_data.get('file_size', ''),
+                'uploaded': file_data.get('uploaded', ''),
+                'status': file_data.get('status', ''),
+                'public': file_data.get('public', '')
+            })
 
 # ============== ROUTES ==============
 

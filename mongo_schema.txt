@@ -1,0 +1,50 @@
+# MongoDB Schema Documentation
+
+## Database Information
+- **Database Name:** `series_db`
+- **Collection Name:** `series_data`
+
+## Indexes
+- `show_title`: Unique index (1)
+
+## Document Structure (Series Document)
+
+{
+  "_id": "ObjectId",
+  "show_title": "String",           // e.g., "The Witcher"
+  "category": "String",             // default: "series"
+  "created_at": "ISODate",          // UTC Timestamp
+  "year": "String",                 // e.g., "2019"
+  "rating": "String",               // e.g., "TV-MA"
+  "seasons": "String",              // e.g., "3 Seasons"
+  "description": "String",          // Plot summary
+  "series_logo": "String",          // URL to show poster/logo
+  "creators": "String",             // List of creators
+  "cast": "String",                 // Full cast list
+  "starring": "String",             // Top stars
+  "show_characteristics": "String", // Genres/Tags
+  "audio": "String",                // Available audio languages
+  "subtitles": "String",            // Available subtitle languages
+  "seasons_data": [                 // Array of Season objects
+    {
+      "Season 01": [                // Key is season name (e.g., "Season 01")
+        {
+          "title": "String",        // Episode title (e.g., "S1.E1 The End's Beginning")
+          "description": "String",  // Episode plot
+          "duration": "String",     // e.g., "1h"
+          "image_url": "String",    // URL to episode thumbnail
+          "filename": "String",     // Standardized filename (e.g., "The_Witcher_S01E01.mkv")
+          "url": "String",          // FileMoon episode URL
+          "subtitle_file": "String" // Path to local/processed subtitle file (Optional)
+        },
+        ...
+      ]
+    },
+    ...
+  ]
+}
+
+## Usage Notes
+- The `show_title` is used as a unique identifier for upsert operations.
+- `seasons_data` uses dynamic keys ("Season 01", "Season 02", etc.) inside objects within an array.
+- Placeholders are filtered out before saving via `remove_non_filemoon_episode_urls`.

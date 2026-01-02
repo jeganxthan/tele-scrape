@@ -11,6 +11,8 @@ from selenium.webdriver.chrome.service import Service
 from selenium.common.exceptions import TimeoutException, StaleElementReferenceException, NoSuchElementException
 from webdriver_manager.chrome import ChromeDriverManager
 import os
+import db_utils
+import filemoon_converter
 def setup_driver():
     options = Options()
     options.add_argument("--headless=new") 
@@ -39,61 +41,72 @@ def safe_click(driver, element):
         print(f"Click error: {e}")
         return False
 
-
-
-
-
-def scrape_amazon_logo(query, driver):
-    """Scrape series logo from Amazon Prime via DuckDuckGo search."""
-    print(f"Attempting to scrape Amazon Prime logo for: {query}")
-    logo_url = ""
+def scrape_stremio_images(tt_id, media_type, driver):
+    """
+    Scrape series logo, fanart, and poster from Stremio staging.
+    tt_id: IMDb ID (e.g. tt1234567)
+    media_type: 'series' or 'movie'
+    """
+    print(f"Attempting to scrape Stremio images for {tt_id} ({media_type})")
+    stremio_data = {
+        "logo": "",
+        "fanart": "",
+        "poster": ""
+    }
+    
+    url = f"https://staging.strem.io/#/detail/{media_type}/{tt_id}/"
     original_window = driver.current_window_handle
     
     try:
         driver.execute_script("window.open('');")
         driver.switch_to.window(driver.window_handles[-1])
+        driver.get(url)
+        time.sleep(5)  # Wait for React app to load and fetch data
         
-        # Search via DuckDuckGo
-        driver.get(f"https://duckduckgo.com/html/?q={query.replace(' ', '+')}+amazon+prime+video")
-        time.sleep(2)
-        
+        # 1. Logo
         try:
-            # Find Amazon link
-            first_result = driver.find_element(By.CSS_SELECTOR, "a.result__a")
-            amazon_url = first_result.get_attribute("href")
-            print(f"Found Amazon URL: {amazon_url}")
-            driver.get(amazon_url)
-            time.sleep(3)
-            # Try to find the LOGO (not poster)
-            try:
-                # Amazon Prime logo - look for images with specific classes or alt text containing show name
-                # Example: <img alt="The Boys" class="ljcPsM" src="https://m.media-amazon.com/images/S/pv-target-images/...png">
-                img = driver.find_element(By.CSS_SELECTOR, "img.ljcPsM, img[class*='title-logo'], img[data-testid='base-image'][alt]") 
-                logo_url = img.get_attribute("src")
-                print(f"Found Amazon logo with selector: {logo_url}")
-            except:
-                # Try to find logo by looking for PNG images (logos are usually PNG)
-                try:
-                    imgs = driver.find_elements(By.TAG_NAME, "img")
-                    for i in imgs:
-                        src = i.get_attribute("src") or ""
-                        alt = i.get_attribute("alt") or ""
-                        
-                        # Look for PNG images from Amazon's media server with show name in alt
-                        if src and "m.media-amazon.com" in src and ".png" in src.lower():
-                            # Check if it's likely a logo (has show name in alt, not a poster)
-                            if alt and query.lower() in alt.lower():
-                                logo_url = src
-                                print(f"Found Amazon logo (PNG with alt): {logo_url}")
-                                break
-                except:
-                    pass
-                    
-        except Exception as e:
-            print(f"Amazon search failed: {e}")
-
+            # Primary logo: look for Metahub logo URL
+            logo_img = driver.find_elements(By.CSS_SELECTOR, "img[src*='/logo/']")
+            if logo_img:
+                stremio_data["logo"] = logo_img[0].get_attribute("src")
+                print(f"Found Stremio logo (Metahub): {stremio_data['logo']}")
+            else:
+                # Fallback to general logo class
+                logo_img = driver.find_elements(By.CSS_SELECTOR, ".logo img")
+                if logo_img:
+                    src = logo_img[0].get_attribute("src")
+                    if "stremio.png" not in src:
+                        stremio_data["logo"] = src
+                        print(f"Found Stremio logo (Selector): {stremio_data['logo']}")
+        except:
+            print("Stremio logo not found.")
+            
+        # 2. Fanart (Background)
+        try:
+            # Primary Fanart: look for div.image with background-image
+            bg_el = driver.find_elements(By.CSS_SELECTOR, "div.image")
+            if bg_el:
+                bg_style = bg_el[0].get_attribute("style")
+                if "background-image" in bg_style and 'url("' in bg_style:
+                    bg_url = bg_style.split('url("')[1].split('")')[0]
+                    stremio_data["fanart"] = bg_url
+                    print(f"Found Stremio fanart: {stremio_data['fanart']}")
+            else:
+                # Fallback to .background class
+                bg_el = driver.find_elements(By.CSS_SELECTOR, ".background img")
+                if bg_el:
+                    stremio_data["fanart"] = bg_el[0].get_attribute("src")
+                    print(f"Found Stremio fanart (Fallback): {stremio_data['fanart']}")
+        except:
+            print("Stremio fanart not found.")
+            
+        # 3. Poster (Construct Reliable Metahub URL)
+        if tt_id:
+            stremio_data["poster"] = f"https://images.metahub.space/poster/medium/{tt_id}/img"
+            print(f"Generated Stremio poster URL: {stremio_data['poster']}")
+            
     except Exception as e:
-        print(f"Error scraping Amazon logo: {e}")
+        print(f"Error scraping Stremio: {e}")
     finally:
         try:
             if len(driver.window_handles) > 1:
@@ -102,127 +115,7 @@ def scrape_amazon_logo(query, driver):
         except:
             pass
             
-    return logo_url
-
-def scrape_netflix_logo(query, driver):
-    """Scrape series logo from Netflix via DuckDuckGo search."""
-    print(f"Attempting to scrape Netflix logo for: {query}")
-    logo_url = ""
-    original_window = driver.current_window_handle
-    
-    try:
-        driver.execute_script("window.open('');")
-        driver.switch_to.window(driver.window_handles[-1])
-        
-        # Search via DuckDuckGo
-        driver.get(f"https://duckduckgo.com/html/?q=site:netflix.com/in/title/+{query.replace(' ', '+')}")
-        time.sleep(2)
-        
-        try:
-            first_result = driver.find_element(By.CSS_SELECTOR, "a.result__a")
-            netflix_url = first_result.get_attribute("href")
-            print(f"Found Netflix URL: {netflix_url}")
-            driver.get(netflix_url)
-            time.sleep(3)
-            
-            # Try to find the LOGO (not poster)
-            try:
-                # Netflix logo - look for title logo images
-                # Example: <img src="https://occ-0-7275-3662.1.nflxso.net/dnm/api/v6/.../logo.webp" alt="" class="default-ltr-iqcdef-cache-1wfyi7w e1e4hbe50">
-                logo_img = driver.find_element(By.CSS_SELECTOR, "img.title-logo, img[class*='title-logo'], img.default-ltr-cache, img[class*='e1e4hbe']")
-                logo_url = logo_img.get_attribute("src")
-                print(f"Found Netflix logo with selector: {logo_url}")
-            except:
-                # Try to find logo by looking for WebP images from Netflix CDN
-                try:
-                    imgs = driver.find_elements(By.TAG_NAME, "img")
-                    for i in imgs:
-                        src = i.get_attribute("src") or ""
-                        
-                        # Look for WebP images from Netflix CDN (logos are usually WebP)
-                        if src and "nflxso.net" in src and ".webp" in src.lower():
-                            # Avoid poster images (they usually have different patterns)
-                            if "title" in src.lower() or "logo" in src.lower():
-                                logo_url = src
-                                print(f"Found Netflix logo (WebP): {logo_url}")
-                                break
-                except:
-                    pass
-
-        except Exception as e:
-             print(f"Netflix search failed: {e}")
-
-    except Exception as e:
-        print(f"Error scraping Netflix logo: {e}")
-    finally:
-        try:
-            if len(driver.window_handles) > 1:
-                driver.close()
-            driver.switch_to.window(original_window)
-        except:
-            pass
-            
-    return logo_url
-
-def scrape_hotstar_logo(query, driver):
-    """Scrape series logo from Hotstar via DuckDuckGo search."""
-    print(f"Attempting to scrape Hotstar logo for: {query}")
-    logo_url = ""
-    original_window = driver.current_window_handle
-    
-    try:
-        driver.execute_script("window.open('');")
-        driver.switch_to.window(driver.window_handles[-1])
-        
-        # Search via DuckDuckGo
-        driver.get(f"https://duckduckgo.com/html/?q=site:hotstar.com+{query.replace(' ', '+')}")
-        time.sleep(2)
-        
-        try:
-            first_result = driver.find_element(By.CSS_SELECTOR, "a.result__a")
-            hotstar_url = first_result.get_attribute("href")
-            print(f"Found Hotstar URL: {hotstar_url}")
-            driver.get(hotstar_url)
-            time.sleep(3)
-            
-            # Try to find the LOGO (not poster)
-            try:
-                # Hotstar logo - look for title logo images
-                logo_img = driver.find_element(By.CSS_SELECTOR, "img[class*='_2-A9IuHSssOiRkxHvku94z'], img[class*='title-logo'], img[alt][src*='hotstar.com'][class*='h-auto']")
-                logo_url = logo_img.get_attribute("src")
-                print(f"Found Hotstar logo with selector: {logo_url}")
-            except:
-                # Try to find logo by looking for images from Hotstar CDN with show name in alt
-                try:
-                    imgs = driver.find_elements(By.TAG_NAME, "img")
-                    for i in imgs:
-                        src = i.get_attribute("src") or ""
-                        alt = i.get_attribute("alt") or ""
-                        
-                        # Look for images from Hotstar CDN with show name in alt
-                        if src and "hotstar.com" in src and alt and query.lower() in alt.lower():
-                            # Check if it's likely a logo (smaller height parameter suggests logo not poster)
-                            if "h_124" in src or "h_100" in src or "h_150" in src:
-                                logo_url = src
-                                print(f"Found Hotstar logo (with alt): {logo_url}")
-                                break
-                except:
-                    pass
-
-        except Exception as e:
-            print(f"Hotstar search failed: {e}")
-
-    except Exception as e:
-        print(f"Error scraping Hotstar logo: {e}")
-    finally:
-        try:
-            if len(driver.window_handles) > 1:
-                driver.close()
-            driver.switch_to.window(original_window)
-        except:
-            pass
-            
-    return logo_url
+    return stremio_data
 
 
 def scrape_imdb(query="The Witcher"):
@@ -245,140 +138,123 @@ def scrape_imdb(query="The Witcher"):
         search_input.clear()
         search_input.send_keys(query)
         time.sleep(1)
-        search_input.send_keys(Keys.ENTER)
         
-        # 3. Click the correct result (TV Series) - IMPROVED with better selectors
-        print("Clicking result...")
-        time.sleep(3)  # Wait for search results to load
-        
+        # 3. Click the correct result (TV Series) - IMPROVED with better logic
+        print("Waiting for suggestions or clicking Enter...")
         clicked = False
         
-        # Strategy 1: Global Link Search (Most Robust)
         try:
-            print("Strategy 1: Global search for title links...")
-            # Find all links that contain the query text
-            links = driver.find_elements(By.TAG_NAME, "a")
-            print(f"Found {len(links)} total links on page.")
-            
-            candidates = []
-            query_lower = query.lower()
-            
-            for link in links:
-                try:
-                    text = link.text.strip()
-                    href = link.get_attribute("href")
-                    
-                    if not text or not href:
-                        continue
-                    
-                    # STRICT: Must be /title/ URL, NOT /name/ URL
-                    if "/title/" not in href or "/name/" in href:
+            # Wait for suggestion dropdown
+            suggestion_container_selector = "ul.react-autosuggest__suggestions-list"
+            try:
+                wait.until(EC.visibility_of_element_located((By.CSS_SELECTOR, suggestion_container_selector)))
+                print("Suggestion dropdown visible.")
+                
+                # Find all suggestions
+                suggestions = driver.find_elements(By.CSS_SELECTOR, "li.react-autosuggest__suggestion")
+                print(f"Found {len(suggestions)} suggestions.")
+                
+                query_lower = query.lower()
+                
+                for sugg in suggestions:
+                    try:
+                        # Extract title and metadata
+                        title_el = sugg.find_element(By.CSS_SELECTOR, ".searchResult__constTitle")
+                        metadata_el = sugg.find_element(By.CSS_SELECTOR, ".searchResult__metadata")
+                        
+                        title_text = title_el.text.strip().lower()
+                        metadata_text = metadata_el.text.strip().lower()
+                        
+                        print(f"Checking suggestion: '{title_text}' | Metadata: '{metadata_text}'")
+                        
+                        # Logic: Priority to TV Series with exact or starting match
+                        is_series = "tv series" in metadata_text or "tv mini-series" in metadata_text
+                        
+                        if is_series and (title_text == query_lower or title_text.startswith(query_lower)):
+                            print(f"Found matching TV series in suggestions: {title_el.text}")
+                            link = sugg.find_element(By.CSS_SELECTOR, "a.searchResult")
+                            safe_click(driver, link)
+                            clicked = True
+                            break
+                    except Exception as e:
                         continue
                         
-                    # Check if text matches query
-                    if query_lower in text.lower():
-                        # Get parent text to check for year/type
-                        try:
-                            parent = link.find_element(By.XPATH, "./ancestor::li")
-                            parent_text = parent.text
-                        except:
-                            parent_text = text
-                        
-                        candidates.append({
-                            "link": link,
-                            "text": text,
-                            "parent_text": parent_text,
-                            "href": href
-                        })
-                except:
-                    continue
+            except Exception as e:
+                print(f"Suggestion dropdown did not appear or errored: {e}")
             
-            print(f"Found {len(candidates)} candidate links.")
-            
-            # Filter candidates - EXCLUDE shorts and movies, PRIORITIZE TV series
-            tv_series_candidates = []
-            other_candidates = []
-            
-            for cand in candidates:
-                p_text = cand["parent_text"].lower()
-                title = cand["text"]
-                
-                print(f"Candidate: '{title}' | Context: {p_text[:80]}...")
-                
-                # Skip short films and movies with duration indicators
-                if "short" in p_text or re.search(r'\d+h\s*\d+m', p_text):
-                    print(f"  ⏭️ Skipping (short/movie): {title}")
-                    continue
-                
-                # Separate TV series from others
-                if "tv series" in p_text or "tv mini series" in p_text:
-                    tv_series_candidates.append(cand)
-                else:
-                    other_candidates.append(cand)
-            
-            # Priority 1: Exact match in TV series
-            for cand in tv_series_candidates:
-                if cand["text"].lower() == query_lower:
-                    print(f"Found Priority 1 match (exact TV series): {cand['text']}")
-                    safe_click(driver, cand["link"])
-                    clicked = True
-                    break
-            
-            # Priority 2: Starts with query in TV series (for "Demon Slayer: Kimetsu no Yaiba")
             if not clicked:
+                print("Fallback: Pressing Enter to search normally...")
+                search_input.send_keys(Keys.ENTER)
+                time.sleep(3) # Wait for results page
+                
+                # --- Strategy 1: Global Link Search (Existing robust logic) ---
+                print("Strategy 1: Global search for title links...")
+                links = driver.find_elements(By.TAG_NAME, "a")
+                candidates = []
+                query_lower = query.lower()
+                
+                for link in links:
+                    try:
+                        text = link.text.strip()
+                        href = link.get_attribute("href")
+                        if not text or not href or "/title/" not in href or "/name/" in href:
+                            continue
+                        if query_lower in text.lower():
+                            try:
+                                parent = link.find_element(By.XPATH, "./ancestor::li")
+                                parent_text = parent.text
+                            except:
+                                parent_text = text
+                            candidates.append({"link": link, "text": text, "parent_text": parent_text, "href": href})
+                    except:
+                        continue
+                
+                tv_series_candidates = []
+                other_candidates = []
+                for cand in candidates:
+                    p_text = cand["parent_text"].lower()
+                    if "short" in p_text or re.search(r'\d+h\s*\d+m', p_text): continue
+                    if "tv series" in p_text or "tv mini series" in p_text:
+                        tv_series_candidates.append(cand)
+                    else:
+                        other_candidates.append(cand)
+                
+                # Priority 1: Exact match in TV series
                 for cand in tv_series_candidates:
-                    if cand["text"].lower().startswith(query_lower):
-                        print(f"Found Priority 2 match (starts with, TV series): {cand['text']}")
-                        safe_click(driver, cand["link"])
-                        clicked = True
-                        break
-            
-            # Priority 3: Any TV series match
-            if not clicked and tv_series_candidates:
-                print(f"Found Priority 3 match (first TV series): {tv_series_candidates[0]['text']}")
-                safe_click(driver, tv_series_candidates[0]["link"])
-                clicked = True
-            
-            # Priority 4: Exact match in other candidates (fallback)
-            if not clicked:
-                for cand in other_candidates:
                     if cand["text"].lower() == query_lower:
-                        print(f"Found Priority 4 match (exact, non-TV): {cand['text']}")
+                        print(f"Found Priority 1 match (exact TV series): {cand['text']}")
                         safe_click(driver, cand["link"])
                         clicked = True
                         break
-                        
-        except Exception as e:
-            print(f"Strategy 1 failed: {e}")
-        
-        # Strategy 2: Exact Title Match (Any Type)
-        if not clicked:
-            try:
-                results = driver.find_elements(By.CSS_SELECTOR, "a.ipc-metadata-list-summary-item__t")
-                for result in results:
-                    if result.text.strip().lower() == query.lower():
-                        print(f"Clicking exact match: {result.text}")
-                        safe_click(driver, result)
-                        clicked = True
-                        break
-            except Exception as e:
-                print(f"Strategy 2 failed: {e}")
-        
-        # Strategy 3: First Title Result
-        if not clicked:
-            try:
-                results = driver.find_elements(By.CSS_SELECTOR, "a.ipc-metadata-list-summary-item__t")
-                if results:
-                    print(f"Clicking first title result: {results[0].text}")
-                    safe_click(driver, results[0])
+                
+                # Priority 2: Starts with query in TV series
+                if not clicked:
+                    for cand in tv_series_candidates:
+                        if cand["text"].lower().startswith(query_lower):
+                            print(f"Found Priority 2 match (starts with, TV series): {cand['text']}")
+                            safe_click(driver, cand["link"])
+                            clicked = True
+                            break
+                
+                # Priority 3: Any TV series match
+                if not clicked and tv_series_candidates:
+                    print(f"Found Priority 3 match (first TV series): {tv_series_candidates[0]['text']}")
+                    safe_click(driver, tv_series_candidates[0]["link"])
                     clicked = True
-            except Exception as e:
-                print(f"Strategy 3 failed: {e}")
+
+        except Exception as e:
+            print(f"Search logic failed: {e}")
         
         if not clicked:
             raise Exception("Could not find and click any search result")
 
         time.sleep(3)
+        
+        # Extract tt-id from URL
+        current_url = driver.current_url
+        tt_id_match = re.search(r'tt\d+', current_url)
+        tt_id = tt_id_match.group(0) if tt_id_match else None
+        print(f"Detected tt-id: {tt_id}")
         
         # 4. Scrape Main Metadata
         print("Scraping metadata...")
@@ -460,20 +336,29 @@ def scrape_imdb(query="The Witcher"):
             
         if is_amazon:
             print("Detected Amazon Prime association.")
-            service_logo = scrape_amazon_logo(query, driver)
+            # service_logo = scrape_amazon_logo(query, driver) # NameError: undefined
         elif is_netflix:
             print("Detected Netflix association.")
-            service_logo = scrape_netflix_logo(query, driver)
+            # service_logo = scrape_netflix_logo(query, driver) # NameError: undefined
         elif is_hotstar:
             print("Detected Hotstar association.")
-            service_logo = scrape_hotstar_logo(query, driver)
+            # service_logo = scrape_hotstar_logo(query, driver) # NameError: undefined
             
-        if service_logo:
+        # Stremio Integration
+        stremio_images = {"logo": "", "fanart": "", "poster": ""}
+        if tt_id:
+            # We assume 'series' for now as the scraper is TV-focused
+            stremio_images = scrape_stremio_images(tt_id, "series", driver)
+            
+        if stremio_images["logo"]:
+            data["series_logo"] = stremio_images["logo"]
+            print(f"Using Stremio logo: {data['series_logo']}")
+        elif service_logo:
             data["series_logo"] = service_logo
             print(f"Using streaming service logo: {service_logo}")
         else:
             # IMDb Poster/Logo Fallback
-            print("Using IMDb poster as logo...")
+            print("Using IMDb poster as logo fallback...")
             try:
                 # Try to get the main poster
                 poster_el = driver.find_element(By.CSS_SELECTOR, "div[data-testid='hero-media__poster'] img, div.ipc-poster img")
@@ -494,8 +379,12 @@ def scrape_imdb(query="The Witcher"):
                     data["series_logo"] = poster_el.get_attribute("src")
                     
             except Exception as e:
-                print(f"Error scraping poster: {e}")
+                print(f"Error scraping poster fallback: {e}")
                 data["series_logo"] = ""
+
+        # Set Poster and Fanart
+        data["poster"] = stremio_images["poster"] or data.get("series_logo", "")
+        data["fanart"] = stremio_images["fanart"]
 
 
         # Creators
@@ -774,7 +663,10 @@ if __name__ == "__main__":
     
     print(f"Scraping IMDb for: {query}")
     result = scrape_imdb(query)
-
+    
+    # Add category field (Required for MongoDB)
+    result["category"] = "series"
+    
     STATIC_DIR = "static"
     os.makedirs(STATIC_DIR, exist_ok=True)
     
@@ -786,4 +678,15 @@ if __name__ == "__main__":
         json.dump(result, f, indent=4, ensure_ascii=False)
     
     print(f"✅ Data saved to {output_file}")
+    
+    # Fill FileMoon URLs from CSV
+    print("Converting placeholders to FileMoon URLs...")
+    result = filemoon_converter.fill_filemoon_urls(result)
+    
+    # Save to MongoDB
+    try:
+        db_utils.save_show_data(result)
+        print("✅ Data saved to MongoDB")
+    except Exception as e:
+        print(f"❌ Failed to save to MongoDB: {e}")
 

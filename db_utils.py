@@ -3,20 +3,22 @@ import datetime
 from pymongo import MongoClient
 from dotenv import load_dotenv
 
-load_dotenv()
-
-MONGO_URI = os.getenv("MONGO_URI")
+# MONGO_URI = os.getenv("MONGO_URI") # Removed global assignment
 DB_NAME = "series_db"
 COLLECTION_NAME = "series_data"
+MOVIE_COLLECTION_NAME = "movie_data"
 
 def get_db_connection():
-    """Establishes a connection to the MongoDB database."""
+    """Establishes a connection to the MongoDB database and refreshes environment variables."""
     try:
-        if not MONGO_URI:
+        load_dotenv(override=True) # Force reload
+        mongo_uri = os.getenv("MONGO_URI")
+        
+        if not mongo_uri:
             print("❌ MONGO_URI not found in environment variables.")
             return None
             
-        client = MongoClient(MONGO_URI)
+        client = MongoClient(mongo_uri)
         # Test connection
         client.admin.command('ping')
         return client
@@ -32,10 +34,15 @@ def init_db():
 
     try:
         db = client[DB_NAME]
-        collection = db[COLLECTION_NAME]
         
-        # Create unique index on show_title
+        # Series collection index
+        collection = db[COLLECTION_NAME]
         collection.create_index("show_title", unique=True)
+        
+        # Movie collection index
+        movie_collection = db[MOVIE_COLLECTION_NAME]
+        movie_collection.create_index("title", unique=True)
+        
         print("✅ Database initialized (MongoDB indexes created).")
     except Exception as e:
         print(f"❌ Database initialization failed: {e}")
@@ -59,10 +66,17 @@ def save_show_data(data):
             print(f"Data keys: {list(data.keys())}")
             return False
 
-        print(f"Attempting to save data for show: '{show_title}'")
+        # Check season data count
+        seasons_data = data.get("seasons_data", [])
+        total_episodes = sum(len(list(s.values())[0]) for s in seasons_data if s and list(s.values()))
+        
+        print(f"Attempting to save show: '{show_title}'")
+        print(f"📊 Stats: {len(seasons_data)} seasons, {total_episodes} valid episodes.")
 
-        # Add/Update timestamp
+        # Add/Update timestamp and category
         data["created_at"] = datetime.datetime.utcnow()
+        if "category" not in data:
+            data["category"] = "series"
 
         # Insert or Update (Upsert)
         collection.replace_one(
@@ -76,6 +90,43 @@ def save_show_data(data):
 
     except Exception as e:
         print(f"❌ Failed to save data: {e}")
+        return False
+
+def save_movie_data(data):
+    """Saves the scraped movie data as a JSON document in movie_data collection."""
+    client = get_db_connection()
+    if not client:
+        return False
+
+    try:
+        db = client[DB_NAME]
+        collection = db[MOVIE_COLLECTION_NAME]
+        
+        title = data.get("title")
+        if not title:
+            print("❌ Cannot save data: 'title' is missing from data dictionary.")
+            print(f"Data keys: {list(data.keys())}")
+            return False
+
+        print(f"Attempting to save movie: '{title}'")
+
+        # Add/Update timestamp
+        data["created_at"] = datetime.datetime.utcnow()
+        if "category" not in data:
+            data["category"] = "movie"
+
+        # Insert or Update (Upsert)
+        collection.replace_one(
+            {"title": title},
+            data,
+            upsert=True
+        )
+
+        print(f"✅ Full JSON data for movie '{title}' saved to MongoDB's {MOVIE_COLLECTION_NAME}.")
+        return True
+
+    except Exception as e:
+        print(f"❌ Failed to save movie data: {e}")
         return False
 
 def get_all_shows():
@@ -175,11 +226,12 @@ def remove_non_filemoon_episode_urls(data: dict) -> dict:
     data["seasons_data"] = cleaned_seasons
     
     # DEBUG LOGGING
-    print(f"DEBUG: remove_non_filemoon_episode_urls called.")
-    print(f"DEBUG: Input seasons count: {len(seasons)}")
-    print(f"DEBUG: Output seasons count: {len(cleaned_seasons)}")
-    if len(seasons) != len(cleaned_seasons):
-        print("DEBUG: Seasons were removed!")
+    total_input_eps = sum(len(list(s.values())[0]) for s in seasons if isinstance(s, dict) and list(s.values()))
+    total_output_eps = sum(len(list(s.values())[0]) for s in cleaned_seasons if isinstance(s, dict) and list(s.values()))
+    
+    print(f"DEBUG: remove_non_filemoon_episode_urls: Input={total_input_eps} eps, Output={total_output_eps} eps.")
+    if total_input_eps > 0 and total_output_eps == 0:
+        print("⚠️ WARNING: All episodes were filtered out as placeholders/invalid!")
     
     return data
 

@@ -5,7 +5,9 @@ import json
 import sys
 from telethon import TelegramClient, errors
 from dotenv import load_dotenv
-from subtitle_generator import SubtitleGenerator
+# from subtitle_generator import SubtitleGenerator (Removed)
+
+import signal
 
 load_dotenv()
 
@@ -18,10 +20,10 @@ DOWNLOAD_DIR = "downloads/"
 SCAN_LIMIT = None
 MAX_CONCURRENT_DOWNLOADS = 3
 
-# Subtitle Generation Configuration
-ENABLE_SUBTITLES = True  # Set to False to disable subtitle generation
-WHISPER_MODEL = "base"   # Options: tiny, base, small, medium, large
-SUBTITLE_LANGUAGE = "en" # None for auto-detect, or specify like "en", "es", "ja"
+# Track active downloads for cleanup: {file_path: percentage}
+active_downloads = {}
+
+# Subtitle Generation Configuration (Removed)
 # ===========================================
 
 def extract_episode_info(text):
@@ -219,9 +221,12 @@ async def process_message(client, msg, semaphore, series_data, downloaded_episod
                 
                 # Progress callback closure
                 last_reported = [-1]
+                active_downloads[local_file_path] = 0
+
                 def progress_callback(current, total):
                     if not total: return
                     percentage = int((current / total) * 100)
+                    active_downloads[local_file_path] = percentage
                     # Report every 10%
                     if percentage // 10 > last_reported[0] // 10:
                         print(f"   ⏳ {full_file_name}: {percentage}%")
@@ -230,48 +235,25 @@ async def process_message(client, msg, semaphore, series_data, downloaded_episod
                         print(f"   ⏳ {full_file_name}: 100%")
                         last_reported[0] = 100
 
-                file_path = await client.download_media(
-                    msg,
-                    file=local_file_path,
-                    progress_callback=progress_callback
-                )
+                try:
+                    file_path = await client.download_media(
+                        msg,
+                        file=local_file_path,
+                        progress_callback=progress_callback
+                    )
+                except (asyncio.CancelledError, KeyboardInterrupt):
+                    if local_file_path in active_downloads and active_downloads[local_file_path] < 100:
+                        if os.path.exists(local_file_path):
+                            print(f"🗑️ Deleting incomplete file: {full_file_name} ({active_downloads[local_file_path]}%)")
+                            os.remove(local_file_path)
+                    raise
+
                 if file_path:
+                    # mark as fully downloaded
+                    active_downloads[local_file_path] = 100
                     print(f"✅ Finished '{full_file_name}'")
                     
-                    # Generate subtitles if enabled
-                    subtitle_path = None
-                    if ENABLE_SUBTITLES:
-                        try:
-                            print(f"📝 Generating subtitles for '{full_file_name}'...")
-                            generator = SubtitleGenerator(
-                                model_name=WHISPER_MODEL,
-                                language=SUBTITLE_LANGUAGE
-                            )
-                            success, subtitle_path, error = await asyncio.to_thread(generator.generate_subtitles, file_path)
-                            if success:
-                                print(f"✅ Subtitles generated: {os.path.basename(subtitle_path)}")
-                                info["subtitle_file"] = os.path.basename(subtitle_path)
-                                
-                                # Burn subtitles
-                                print(f"🔥 Starting subtitle burn for '{full_file_name}'...")
-                                burn_success, burned_path, burn_error = await asyncio.to_thread(
-                                    generator.burn_subtitles, file_path, subtitle_path
-                                )
-                                if burn_success:
-                                    print(f"✅ Subtitles burned successfully.")
-                                    # Delete the subtitle file
-                                    try:
-                                        os.remove(subtitle_path)
-                                        print(f"🗑️ Deleted subtitle file: {os.path.basename(subtitle_path)}")
-                                    except Exception as e:
-                                        print(f"⚠️ Failed to delete subtitle file: {e}")
-                                else:
-                                    print(f"⚠️ Subtitle burn failed: {burn_error}")
-                                    
-                            else:
-                                print(f"⚠️ Subtitle generation failed: {error}")
-                        except Exception as e:
-                            print(f"⚠️ Subtitle generation/burning error: {e}")
+                    # Subtitle Generation and Burning (Removed)
                     
                     try:
                         await msg.delete()
@@ -281,8 +263,6 @@ async def process_message(client, msg, semaphore, series_data, downloaded_episod
                     info["file"] = os.path.basename(file_path)
 
                     # update series_data structure
-                    # Note: Dictionary operations are thread-safe in Python (GIL), and we are in a single-threaded async loop
-                    # so this is safe without locks unless we await inside the critical section.
                     if series_name not in series_data["series"]:
                         series_data["series"][series_name] = {"seasons": {}}
                     if season_num_str not in series_data["series"][series_name]["seasons"]:
@@ -311,14 +291,21 @@ async def process_message(client, msg, semaphore, series_data, downloaded_episod
         else:
             # print(f"   ⚠️ Skipping message {msg.id}: Not a video (mime='{mime}').")
             pass
+    except (asyncio.CancelledError, KeyboardInterrupt):
+        # Already handled download cleanup above, but re-raise to stop other tasks
+        raise
     except errors.RPCError as rpc:
         print(f"   ⚠️ RPC error for {full_file_name}:", rpc)
     except Exception as ex:
         print(f"   ⚠️ Failed to download {full_file_name}:", ex)
+    finally:
+        if local_file_path in active_downloads:
+            del active_downloads[local_file_path]
 
 async def main():
     os.makedirs(DOWNLOAD_DIR, exist_ok=True)
-    client = TelegramClient(SESSION_NAME, API_ID, API_HASH)
+    # receive_updates=False is crucial to avoid PersistentTimestampOutdatedError in scraping scripts
+    client = TelegramClient(SESSION_NAME, API_ID, API_HASH, receive_updates=False)
 
     print("🚀 Starting Telegram client...")
     await client.start()
@@ -341,15 +328,48 @@ async def main():
     counter_lock = asyncio.Lock()
 
     all_messages = []
-    async for msg in client.iter_messages(target, limit=SCAN_LIMIT):
-        all_messages.append(msg)
+    
+    # Retry mechanism for PersistentTimestampOutdatedError
+    max_retries = 3
+    retry_delay = 5
+    
+    for attempt in range(max_retries):
+        try:
+            print(f"📥 Scanning chat: {getattr(target, 'title', TARGET_CHAT)} (Attempt {attempt + 1}/{max_retries})")
+            async for msg in client.iter_messages(target, limit=SCAN_LIMIT):
+                all_messages.append(msg)
+            break # Success, exit retry loop
+        except errors.PersistentTimestampOutdatedError as e:
+            print(f"⚠️ Telegram internal issue (PTS outdated): {e}")
+            if attempt < max_retries - 1:
+                print(f"🔄 Attempting to re-sync session state (Attempt {attempt + 1})...")
+                # Clean reconnection sometimes helps refreshing the internal state
+                await client.disconnect()
+                await asyncio.sleep(retry_delay)
+                await client.start()
+                
+                # Forced sync by getting dialogs - this often refreshes the internal state (pts/qts)
+                print("⏳ Fetching dialogs to refresh state...")
+                await client.get_dialogs(limit=20)
+                await asyncio.sleep(2)
+            else:
+                print("❌ PersistentTimestampOutdatedError persisted after multiple retries.")
+                print("💡 Suggestion: Try deleting the 'series_session.session' file and re-logging if this error continues.")
+                await client.disconnect()
+                return
+        except Exception as e:
+            print(f"❌ Unexpected error during scan: {e}")
+            await client.disconnect()
+            return
+
     all_messages.sort(key=lambda m: m.id)
 
     print(f"Found {len(all_messages)} messages. Processing...")
 
     semaphore = asyncio.Semaphore(MAX_CONCURRENT_DOWNLOADS)
+    
+    # Process all messages concurrently, limited by semaphore
     tasks = []
-
     for msg in all_messages:
         task = asyncio.create_task(
             process_message(
@@ -363,31 +383,17 @@ async def main():
             )
         )
         tasks.append(task)
-
+    
     if tasks:
-        await asyncio.gather(*tasks)
+        try:
+            await asyncio.gather(*tasks)
+        except (asyncio.CancelledError, KeyboardInterrupt):
+            print("\n🛑 Interrupted! Cleaning up...")
+            # The individual process_message tasks handle their own cleanup
+            for t in tasks:
+                t.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
 
-    # Save metadata JSON per series
-    print("\n--- Season Completion Summary ---")
-    if series_data["series"]:
-        for sname, sinfo in series_data["series"].items():
-            s_clean = re.sub(r'[^\w\s-]', '', sname).strip().replace(' ', '_')
-            json_path = os.path.join(DOWNLOAD_DIR, f"{s_clean}.json")
-            with open(json_path, "w", encoding="utf-8") as f:
-                json.dump(sinfo, f, indent=4, ensure_ascii=False)
-            print(f"\n🧾 Metadata for '{sname}' saved to: {json_path}")
-
-            for season_num, season_details in sinfo["seasons"].items():
-                total_expected = season_details.get("total_episodes")
-                downloaded_count = len(season_details["episodes"])
-                if total_expected is not None and downloaded_count == total_expected:
-                    print(f"✅ Series '{sname}', Season {season_num} is complete ({downloaded_count}/{total_expected}).")
-                elif total_expected is not None:
-                    print(f"⏳ Series '{sname}', Season {season_num} is {downloaded_count}/{total_expected} complete.")
-                else:
-                    print(f"ℹ️ Series '{sname}', Season {season_num} has {downloaded_count} episodes downloaded (total unknown).")
-    else:
-        print("No series data to process.")
 
     print(f"\n🎉 Completed. Total episodes downloaded: {counter_container[0]}")
     await client.disconnect()
