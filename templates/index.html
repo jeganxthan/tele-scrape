@@ -1,0 +1,296 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Tele-Scrape Dashboard</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="/static/css/style.css">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+</head>
+
+<body>
+    <div class="app-container">
+        <!-- Sidebar -->
+        <nav class="sidebar">
+            <div class="logo">
+                <i class="fa-solid fa-film"></i>
+                <span>Tele-Scrape</span>
+            </div>
+            <ul class="nav-links">
+                <li class="active" data-tab="dashboard">
+                    <a href="#"><i class="fa-solid fa-gauge-high"></i> Dashboard</a>
+                </li>
+                <li data-tab="anime-scraper">
+                    <a href="#"><i class="fa-solid fa-ghost"></i> Anime Scraper</a>
+                </li>
+                <li data-tab="movie-scraper">
+                    <a href="#"><i class="fa-solid fa-film"></i> Movie Scraper</a>
+                </li>
+                <li data-tab="series-scraper">
+                    <a href="#"><i class="fa-solid fa-tv"></i> Series Scraper</a>
+                </li>
+                <li data-tab="mkv">
+                    <a href="#"><i class="fa-solid fa-file-video"></i> MKV Process</a>
+                </li>
+                <li data-tab="upload">
+                    <a href="#"><i class="fa-solid fa-cloud-arrow-up"></i> Upload</a>
+                </li>
+                <li data-tab="database">
+                    <a href="#"><i class="fa-solid fa-database"></i> Database</a>
+                </li>
+                <li data-tab="popular">
+                    <a href="#"><i class="fa-solid fa-fire"></i> Popular Titles</a>
+                </li>
+            </ul>
+        </nav>
+
+        <!-- Main Content -->
+        <main class="main-content">
+            <header>
+                <h1>Dashboard</h1>
+                <div class="status-indicator online">
+                    <span class="dot"></span> System Online
+                </div>
+            </header>
+
+            <!-- Dashboard View -->
+            <div id="dashboard" class="view active">
+                <div class="stats-grid">
+                    <div class="stat-card">
+                        <div class="icon-box purple"><i class="fa-solid fa-database"></i></div>
+                        <div class="stat-info">
+                            <h3>Metadata Scraped</h3>
+                            <p class="value">--</p>
+                        </div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="icon-box blue"><i class="fa-solid fa-download"></i></div>
+                        <div class="stat-info">
+                            <h3>Subtitles</h3>
+                            <p class="value">--</p>
+                        </div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="icon-box green"><i class="fa-solid fa-check-circle"></i></div>
+                        <div class="stat-info">
+                            <h3>Uploads</h3>
+                            <p class="value">--</p>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="quick-actions">
+                    <h2>Quick Actions</h2>
+                    <div class="action-grid">
+                        <button class="action-card" onclick="switchTab('scraper')">
+                            <i class="fa-solid fa-magnifying-glass"></i>
+                            <span>New Search</span>
+                        </button>
+                        <button class="action-card" onclick="triggerMKV()">
+                            <i class="fa-solid fa-wand-magic-sparkles"></i>
+                            <span>Run MKV Tool</span>
+                        </button>
+                        <button class="action-card" onclick="triggerCSVUpdate()">
+                            <i class="fa-solid fa-rotate"></i>
+                            <span>Update CSV</span>
+                        </button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Anime Scraper View -->
+            <div id="anime-scraper" class="view">
+                <div class="glass-panel">
+                    <h2><i class="fa-solid fa-ghost"></i> Anime Scraper</h2>
+                    <div class="input-group">
+                        <input type="text" id="animeInput" placeholder="Enter Anime name (e.g., Demon Slayer)">
+                        <button class="btn primary" onclick="scrapeContent('anime')">Scrape Anime</button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Movie Scraper View -->
+            <div id="movie-scraper" class="view">
+                <div class="glass-panel">
+                    <h2><i class="fa-solid fa-film"></i> Movie Scraper</h2>
+                    <div class="input-group">
+                        <input type="text" id="movieInput" placeholder="Enter Movie name (e.g., Inception)">
+                        <button class="btn primary" onclick="scrapeContent('movie')">Scrape Movie</button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Series Scraper View -->
+            <div id="series-scraper" class="view">
+                <div class="glass-panel">
+                    <h2><i class="fa-solid fa-tv"></i> Series Scraper</h2>
+                    <div class="input-group">
+                        <input type="text" id="seriesInput" placeholder="Enter Series name (e.g., Breaking Bad)">
+                        <button class="btn primary" onclick="scrapeContent('series')">Scrape Series</button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Database View -->
+            <div id="database" class="view">
+                <div class="glass-panel">
+                    <h2><i class="fa-solid fa-database"></i> Database Content</h2>
+                    <button class="btn secondary" onclick="loadDatabase()">Refresh Database</button>
+                    <div class="db-grid mt-4">
+                        <div class="db-column">
+                            <h3><i class="fa-solid fa-film"></i> Movies</h3>
+                            <ul id="movieList" class="item-list"></ul>
+                        </div>
+                        <div class="db-column">
+                            <h3><i class="fa-solid fa-tv"></i> Series</h3>
+                            <ul id="seriesList" class="item-list"></ul>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Shared Result Container (Hidden initially, moved by JS) -->
+            <div id="resultContainer" class="glass-panel mt-4 hidden">
+                <h3>Scrape Result</h3>
+                <div id="resultOutput" class="result-area">
+                    <div class="loader hidden"></div>
+                    <pre id="jsonOutput" class="text-log"></pre>
+                </div>
+            </div>
+
+            <!-- MKV Process View -->
+            <div id="mkv" class="view">
+                <div class="glass-panel">
+                    <h2><i class="fa-solid fa-file-video"></i> MKV Processor</h2>
+                    <p class="desc">Automatically mux MP4 video and SRT subtitles from the <code>movie/</code> directory
+                        and move them to <code>downloads/</code>.</p>
+                    <button class="btn primary large" onclick="triggerMKV()">
+                        <i class="fa-solid fa-play"></i> Start Processing
+                    </button>
+                    <div id="mkvLog" class="log-area text-log"></div>
+                </div>
+            </div>
+
+            <!-- Upload View -->
+            <div id="upload" class="view">
+                <div class="glass-panel">
+                    <h2><i class="fa-solid fa-cloud-arrow-up"></i> FileMoon Uploader</h2>
+                    <!-- Simplified controls as requested -->
+                    <button class="btn primary large" onclick="triggerUpload()">
+                        <i class="fa-solid fa-upload"></i> Start Upload
+                    </button>
+
+                    <div id="uploadProgress" class="progress-container hidden mt-4">
+                        <div class="progress-info">
+                            <span id="progressFile">Uploading...</span>
+                            <span id="progressCount">0/0</span>
+                        </div>
+                        <div class="progress-rail">
+                            <div id="progressBar" class="progress-fill" style="width: 0%"></div>
+                        </div>
+                        <div class="progress-stats">
+                            <span id="progressPercent">0%</span>
+                        </div>
+
+                        <div id="liveUploadList" class="live-list mt-3 mb-1">
+                            <!-- Recently completed items will appear here -->
+                        </div>
+                    </div>
+
+                    <div id="uploadLog" class="log-area text-log"></div>
+                </div>
+
+                <div class="glass-panel mt-4">
+                    <h3>FileMoon CSV Content</h3>
+                    <div class="table-container">
+                        <table id="recentUploadsTable">
+                            <thead>
+                                <tr>
+                                    <th>Title/Filename</th>
+                                    <th>File Code</th>
+                                    <th>Size</th>
+                                </tr>
+                            </thead>
+                            <tbody></tbody>
+                        </table>
+                    </div>
+                    <button class="btn secondary mt-4" onclick="loadFullCsvTable()">Refresh List</button>
+                </div>
+            </div>
+
+            <!-- Database View -->
+            <div id="database" class="view">
+                <div class="glass-panel">
+                    <h2><i class="fa-solid fa-database"></i> Database Content</h2>
+                    <button class="btn secondary" onclick="loadDatabase()">Refresh Database</button>
+
+                    <div class="db-grid mt-4">
+                        <!-- Movies -->
+                        <div class="db-column">
+                            <h3><i class="fa-solid fa-film"></i> Movies</h3>
+                            <ul id="movieList" class="item-list"></ul>
+                        </div>
+
+                        <!-- Series -->
+                        <div class="db-column">
+                            <h3><i class="fa-solid fa-tv"></i> Series</h3>
+                            <ul id="seriesList" class="item-list"></ul>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Popular Titles View -->
+            <div id="popular" class="view">
+                <div class="glass-panel">
+                    <h2><i class="fa-solid fa-fire"></i> Popular Titles Management</h2>
+                    <p class="desc">Add and manage popular titles that will be featured prominently.</p>
+
+                    <div class="input-group">
+                        <div class="autocomplete-wrapper">
+                            <input type="text" id="popularInput" placeholder="Search and add title..."
+                                autocomplete="off">
+                            <div id="autocompleteList" class="autocomplete-items"></div>
+                        </div>
+                        <button class="btn primary" onclick="addPopularTitle()">
+                            <i class="fa-solid fa-plus"></i> Add to Popular
+                        </button>
+                    </div>
+
+                    <div class="glass-panel mt-4" style="background: rgba(0,0,0,0.2);">
+                        <h3>Current Popular Titles</h3>
+                        <ul id="popularList" class="item-list"></ul>
+                    </div>
+                </div>
+            </div>
+    </div>
+
+    <!-- Settings View (Placeholder for CSV Update) -->
+    <div id="settings" class="view">
+        <div class="glass-panel">
+            <h2><i class="fa-solid fa-database"></i> Database Management</h2>
+            <div class="setting-item">
+                <div class="info">
+                    <h3>Update FileMoon CSV</h3>
+                    <p>Sync local database with latest files from FileMoon.</p>
+                </div>
+                <button class="btn secondary" onclick="triggerCSVUpdate()">Update Now</button>
+            </div>
+            <div id="csvLog" class="text-log"></div>
+        </div>
+    </div>
+
+    </main>
+    </div>
+
+    <!-- Notification Container -->
+    <div id="notification-container"></div>
+
+    <script src="/static/js/script.js"></script>
+</body>
+
+</html>

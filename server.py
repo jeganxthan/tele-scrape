@@ -1,553 +1,301 @@
-
-# server.py
-import json
-import time
-import re
 import os
-import asyncio
-import csv
-from flask import Flask, jsonify, request
+import sys
+from pathlib import Path
+from flask import Flask, request, jsonify, render_template
 from dotenv import load_dotenv
 
-# Selenium imports (IMDb scraper)
-from selenium import webdriver
-from selenium.webdriver.common.by import By
-from selenium.webdriver.common.keys import Keys
-from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
-from selenium.webdriver.chrome.service import Service
-from selenium.common.exceptions import TimeoutException, StaleElementReferenceException, NoSuchElementException
-from webdriver_manager.chrome import ChromeDriverManager
-
-# Optional FileMoon import
-try:
-    from fileMoon import FileMoon
-    FILEMOON_AVAILABLE = True
-except ImportError:
-    FileMoon = None
-    FILEMOON_AVAILABLE = False
-    print("⚠️ FileMoon module not found. FileMoon features will be disabled.")
-
-# Local imports (assume these modules exist in your project)
-from imdb_scraper import scrape_imdb
-from filemoon_converter import fill_filemoon_urls
+# Import existing modules
+import movie_metadata
+import anime_metadata
+import mkv
+import subtitle_downloader
+import movie_uploader
+import filemoon_subtitle_uploader
+import update_csv
 import db_utils
+from fileMoon import FileMoon
 
 # Load environment variables
 load_dotenv()
 
 app = Flask(__name__)
 
-# ============== CONFIGURATION ==============
-DOWNLOAD_DIR = "downloads/"
-FILEMOON_API_KEY = os.getenv("FILEMOON_API_KEY")
-FTP_HOST = os.getenv("FTP_HOST")
-FTP_USER = os.getenv("FTP_USER")
-FTP_PASS = os.getenv("FTP_PASS")
-MAX_CONCURRENT_UPLOADS = int(os.getenv("MAX_CONCURRENT_UPLOADS", 3))
-# ===========================================
-
-# Initialize FileMoon client
-filemoon_client = None
-if FILEMOON_AVAILABLE and FILEMOON_API_KEY:
-    filemoon_client = FileMoon(FILEMOON_API_KEY)
-    print("✅ FileMoon client initialized.")
-elif not FILEMOON_AVAILABLE:
-    print("⚠️ FileMoon module not available. FileMoon uploads will be skipped.")
-else:
-    print("⚠️ FILEMOON_API_KEY not found in .env. FileMoon uploads will be skipped.")
-
-# ---------------- Helper: Strict FileMoon URL filter ----------------
-# Keep only URLs that match: https?://(www.)?filemoon.in/e/<id> (optionally trailing slash or query)
-FILEMOON_EPISODE_REGEX = re.compile(
-    r"^https?://(?:www\.)?filemoon\.in/e/[A-Za-z0-9_-]+(?:/)?(?:\?.*)?$",
-    re.IGNORECASE
-)
-
-def is_valid_filemoon_episode_url(url: str) -> bool:
-    """Return True only if the URL matches a real FileMoon episode pattern."""
-    if not url:
-        return False
-    url = url.strip()
-    # Quick reject placeholder
-    if "placeholder" in url.lower():
-        return False
-    # Match strict FileMoon /e/ pattern
-    if FILEMOON_EPISODE_REGEX.match(url):
-        return True
-    return False
-
-def remove_non_filemoon_episode_urls(data: dict) -> (dict, int, list):
-    """
-    Walk data['seasons_data'] and keep only episodes whose 'url' matches is_valid_filemoon_episode_url().
-    Returns cleaned data, count removed, and a list of removed episodes for logging/audit.
-    """
-    removed_count = 0
-    removed_items = []
-    if not data:
-        return data, removed_count, removed_items
-
-    seasons = data.get("seasons_data", [])
-    cleaned_seasons = []
-
-    for season_entry in seasons:
-        if not isinstance(season_entry, dict):
-            continue
-        new_season_entry = {}
-        for season_key, episodes in season_entry.items():
-            if not isinstance(episodes, list):
-                continue
-            cleaned_eps = []
-            for ep in episodes:
-                ep_url = (ep.get("url") or "").strip()
-                if not is_valid_filemoon_episode_url(ep_url):
-                    removed_count += 1
-                    removed_items.append({
-                        "season": season_key,
-                        "title": ep.get("title"),
-                        "filename": ep.get("filename"),
-                        "url": ep_url
-                    })
-                    print(f"Removed non-filemoon or placeholder episode -> {ep.get('filename')} url='{ep_url}'")
-                    continue
-                cleaned_eps.append(ep)
-            if cleaned_eps:
-                new_season_entry[season_key] = cleaned_eps
-        if new_season_entry:
-            cleaned_seasons.append(new_season_entry)
-
-    data["seasons_data"] = cleaned_seasons
-    return data, removed_count, removed_items
-
-# ---------------- Helper: Subtitle Matching ----------------
-from pathlib import Path
-
-def find_local_subtitles(download_dir: str) -> dict:
-    """
-    Walks through DOWNLOAD_DIR and finds all .srt files.
-    Returns a dict: { filename_stem: full_path_to_subtitle }
-    """
-    subtitle_map = {}
-    if not os.path.isdir(download_dir):
-        return subtitle_map
-
-    for root, _, files in os.walk(download_dir):
-        for file in files:
-            if file.lower().endswith(".srt"):
-                # stem "Show_S01E01" from "Show_S01E01.srt"
-                stem = Path(file).stem
-                full_path = os.path.join(root, file)
-                subtitle_map[stem] = full_path
-    return subtitle_map
-
-def attach_local_subtitles(data: dict, download_dir: str) -> dict:
-    """
-    Matches episodes to local subtitles based on filename stem.
-    """
-    subtitle_map = find_local_subtitles(download_dir)
-    if not subtitle_map:
-        return data
-
-    seasons = data.get("seasons_data", [])
-    for season_entry in seasons:
-        if not isinstance(season_entry, dict):
-            continue
-        for season_key, episodes in season_entry.items():
-            if not isinstance(episodes, list):
-                continue
-            for ep in episodes:
-                filename = ep.get("filename")
-                if filename:
-                    stem = Path(filename).stem
-                    if stem in subtitle_map:
-                        ep["subtitle"] = subtitle_map[stem]
-                        print(f"Found subtitle for {filename}: {subtitle_map[stem]}")
-    return data
-# -------------------------------------------------------------------
-
-# ---------------- FileMoon upload utilities (unchanged) -----------------
-def extract_info_from_filename(filename):
-    """
-    Extracts series, season, and episode from various filename formats.
-    Supported:
-      - Series_Name_S01E01.mp4
-      - Series Name 1.mp4 (mapped to Episode 1)
-      - Series_Name_Part_1.mp4
-    """
-    info = {"series": None, "season_number": 1, "episode_number": 0}
-    
-    # Format 1: Series_S01E01
-    match1 = re.search(r"^(.*?)_S(\d+)E(\d+)", filename, re.IGNORECASE)
-    if match1:
-        info["series"] = match1.group(1).replace('_', ' ').strip()
-        info["season_number"] = int(match1.group(2))
-        info["episode_number"] = int(match1.group(3))
-        return info
-        
-    # Format 2: Series Episode 1
-    match2 = re.search(r"^(.*?)\s+(?:Episode|Ep)\s*(\d+)", filename, re.IGNORECASE)
-    if match2:
-        info["series"] = match2.group(1).replace('_', ' ').strip()
-        info["episode_number"] = int(match2.group(2))
-        return info
-
-    # Format 3: Series 1 (generic fallback)
-    match3 = re.search(r"^(.*?)\s+(\d+)\.(mkv|mp4|avi|mov)$", filename, re.IGNORECASE)
-    if match3:
-        info["series"] = match3.group(1).replace('_', ' ').strip()
-        info["episode_number"] = int(match3.group(2))
-        return info
-        
-    return info
-
-def upload_progress_callback(current, total, file_name):
-    percentage = (current / total) * 100
-    if int(percentage) % 10 == 0 and int(percentage) > 0:
-         print(f"         Uploading '{file_name}': {percentage:.0f}%", end='\r')
-
-def upload_single_file_sync(local_file_path, remote_ftp_path, filename):
-    try:
-        print(f"      ⬆️ Starting upload: '{filename}'")
-        success = filemoon_client.ftp_upload(
-            local_file_path,
-            FTP_HOST,
-            FTP_USER,
-            FTP_PASS,
-            remote_ftp_path,
-            progress_callback=upload_progress_callback
-        )
-        return success, None
-    except Exception as e:
-        return False, str(e)
-
-def cleanup_empty_dirs(file_path):
-    try:
-        season_dir = os.path.dirname(file_path)
-        if os.path.isdir(season_dir) and not os.listdir(season_dir):
-            os.rmdir(season_dir)
-            print(f"         🗑️ Deleted empty season folder: '{season_dir}'")
-            series_dir = os.path.dirname(season_dir)
-            if os.path.isdir(series_dir) and not os.listdir(series_dir):
-                os.rmdir(series_dir)
-                print(f"         🗑️ Deleted empty series folder: '{series_dir}'")
-    except Exception as e:
-        print(f"         ⚠️ Error during cleanup: {e}")
-
-async def upload_local_files_to_filemoon():
-    if not filemoon_client:
-        return {"status": "error", "message": "FileMoon API key not configured. Uploads skipped."}
-    if not FTP_HOST or not FTP_USER or not FTP_PASS:
-        return {"status": "error", "message": "FTP credentials not configured in .env. FTP uploads skipped."}
-
-    uploaded_count = 0
-    failed_uploads = []
-    files_to_upload = []
-
-    if not os.path.isdir(DOWNLOAD_DIR):
-        print(f"Download dir '{DOWNLOAD_DIR}' does not exist.")
-        return {"status": "success", "uploaded_count": 0, "failed_uploads": [], "csv_report": None}
-
-    # Recursive walk through DOWNLOAD_DIR
-    for root, dirs, files in os.walk(DOWNLOAD_DIR):
-        for filename in files:
-            if filename.lower().endswith((".mkv", ".mp4", ".avi", ".mov", ".srt")):
-                local_file_path = os.path.join(root, filename)
-                
-                # Determine remote path based on directory structure relative to DOWNLOAD_DIR
-                relative_path = os.path.relpath(root, DOWNLOAD_DIR)
-                
-                if relative_path == ".":
-                     # File is directly in downloads/, try to infer series from filename
-                     info = extract_info_from_filename(filename)
-                     series_name = info.get("series") or "Unsorted"
-                     remote_ftp_dir = os.path.join("/", series_name)
-                     season_name = "General"
-                else:
-                    # Folder structure: Series/Season/Episode
-                    path_parts = relative_path.split(os.sep)
-                    series_name = path_parts[0].replace('_', ' ').strip()
-                    remote_ftp_dir = os.path.join("/", *path_parts)
-                    season_name = path_parts[-1]
-                
-                remote_ftp_path = os.path.join(remote_ftp_dir, filename)
-                
-                print(f"DEBUG: Found file {filename} in {relative_path}. Remote path will be {remote_ftp_path}")
-                
-                files_to_upload.append({
-                    "local_path": local_file_path,
-                    "remote_path": remote_ftp_path,
-                    "filename": filename,
-                    "series": series_name,
-                    "season": season_name
-                })
-    
-    # Sort files to ensure logical upload order
-    files_to_upload.sort(key=lambda x: (x["series"], x["filename"]))
-    
-    print(f"Found {len(files_to_upload)} files to process recursively.")
-
-    if uploaded_count > 0:
-        print("Waiting 10 seconds for FileMoon to index files before updating CSV...")
-        await asyncio.sleep(10)
-
-    print(f"Found {len(files_to_upload)} files to process.")
-
-    semaphore = asyncio.Semaphore(MAX_CONCURRENT_UPLOADS)
-    loop = asyncio.get_running_loop()
-
-    async def upload_task(file_info):
-        async with semaphore:
-            success, error = await loop.run_in_executor(
-                None,
-                upload_single_file_sync,
-                file_info["local_path"],
-                file_info["remote_path"],
-                file_info["filename"]
-            )
-            if success:
-                print(f"\n         ✅ Finished: '{file_info['filename']}'")
-                try:
-                    os.remove(file_info['local_path'])
-                    print(f"         🗑️ Deleted local file: '{file_info['local_path']}'")
-                    cleanup_empty_dirs(file_info['local_path'])
-                except OSError as e:
-                    print(f"         ⚠️ Error deleting file: {e}")
-                return True, None
-            else:
-                print(f"\n         ❌ Failed: '{file_info['filename']}' - {error if error else 'Unknown error'}")
-                return False, f"{file_info['local_path']} (Error: {error})"
-
-    tasks = [upload_task(f) for f in files_to_upload]
-    if tasks:
-        results = await asyncio.gather(*tasks)
-        for success, error_msg in results:
-            if success:
-                uploaded_count += 1
-            else:
-                failed_uploads.append(error_msg)
-
-    print(f"\n🎉 Completed FileMoon upload process. Total uploaded: {uploaded_count}, Failed: {len(failed_uploads)}")
-    csv_file = await generate_filemoon_csv()
-    return {
-        "status": "success",
-        "uploaded_count": uploaded_count,
-        "failed_uploads": failed_uploads,
-        "csv_report": csv_file
-    }
-
-async def generate_filemoon_csv():
-    if not filemoon_client:
-        return None
-    print("\n📄 Generating FileMoon CSV report...")
-    csv_filename = "filemoon_files.csv"
-    try:
-        loop = asyncio.get_running_loop()
-        await loop.run_in_executor(None, _write_csv_sync, csv_filename)
-        print(f"✅ CSV report saved to: {csv_filename}")
-        return csv_filename
-    except Exception as e:
-        print(f"❌ Failed to generate CSV: {e}")
-        return None
-
-def fetch_all_files_recursively(folder_id=None):
-    """
-    Recursively fetch all files from FileMoon starting from folder_id.
-    If folder_id is None, starts from root.
-    """
-    all_files = []
-    
-    # 1. Fetch files in current folder (with pagination)
-    page = 1
-    while True:
-        try:
-            # f_list arguments: fld_id, name, created, public, per_page, page
-            response = filemoon_client.f_list(
-                fld_id=str(folder_id) if folder_id else None, 
-                per_page="100", 
-                page=str(page)
-            )
-            
-            if not response or 'result' not in response or 'files' not in response['result']:
-                break
-            
-            files = response['result']['files']
-            if not files:
-                break
-                
-            all_files.extend(files)
-            
-            # If we got fewer than 100 results, we've reached the last page for this folder
-            if len(files) < 100:
-                break
-            page += 1
-        except Exception as e:
-            print(f"⚠️ Error fetching files for folder {folder_id} page {page}: {e}")
-            break
-
-    # 2. Fetch subfolders and recurse
-    try:
-        response_folders = filemoon_client.fld_list(fld_id=str(folder_id) if folder_id else None)
-        if response_folders and 'result' in response_folders and 'folders' in response_folders['result']:
-            folders = response_folders['result']['folders']
-            for folder in folders:
-                # API might return 'id' or 'fld_id', checking both just in case
-                f_id = folder.get('id') or folder.get('fld_id')
-                f_name = folder.get('name', 'Unknown')
-                if f_id:
-                     print(f"   📂 Recursing into folder: '{f_name}' (ID: {f_id})")
-                     sub_files = fetch_all_files_recursively(f_id)
-                     all_files.extend(sub_files)
-    except Exception as e:
-         print(f"⚠️ Error fetching subfolders for folder {folder_id}: {e}")
-
-    return all_files
-
-def _write_csv_sync(filename):
-    with open(filename, mode='w', newline='', encoding='utf-8') as csv_file:
-        fieldnames = ['file_code', 'title', 'file_size', 'uploaded', 'status', 'public']
-        writer = csv.DictWriter(csv_file, fieldnames=fieldnames)
-        writer.writeheader()
-        
-        print("   ⏳ Fetching complete file list from FileMoon (this may take a moment)...")
-        all_files = fetch_all_files_recursively(folder_id=None)
-        
-        print(f"   📝 Writing {len(all_files)} files to CSV...")
-        for file_data in all_files:
-            writer.writerow({
-                'file_code': file_data.get('file_code', ''),
-                'title': file_data.get('title', ''),
-                'file_size': file_data.get('file_size', ''),
-                'uploaded': file_data.get('uploaded', ''),
-                'status': file_data.get('status', ''),
-                'public': file_data.get('public', '')
-            })
-
-# ============== ROUTES ==============
-
-@app.route("/")
+@app.route('/')
 def index():
-    return """
-    <h1>Unified IMDb Scraper & FileMoon Bot Server</h1>
-    <h2>Available Endpoints:</h2>
-    <ul>
-        <li><code>GET /scrape_imdb?query=SHOW_NAME</code> - Scrape IMDb data and save JSON</li>
-        <li><code>GET /upload_to_filemoon</code> - Upload local files to FileMoon</li>
-        <li><code>GET /health</code> - Health check</li>
-    </ul>
-    <h3>Examples:</h3>
-    <ul>
-        <li><a href="/scrape_imdb?query=The Boys">/scrape_imdb?query=The Boys</a></li>
-    </ul>
-    """
+    return render_template('index.html')
 
-@app.route('/scrape_imdb', methods=['GET'])
-def scrape_imdb_endpoint():
-    query = request.args.get('query')
-    if not query:
-        return jsonify({"error": "Query parameter is required. Use ?query=SHOW_NAME"}), 400
+@app.route('/health', methods=['GET'])
+def health_check():
+    return jsonify({"status": "healthy", "service": "tele-scrape-server"}), 200
 
+@app.route('/scrape/movie', methods=['POST'])
+def scrape_movie():
+    data = request.get_json()
+    if not data or 'name' not in data:
+        return jsonify({"error": "Missing 'name' in body"}), 400
     try:
-        print(f"Scraping request for: {query}")
-
-        # 1. Scrape IMDb for full metadata (episodes, cast, etc.)
-        print("Step 1: Scraping IMDb for metadata...")
-        imdb_data = scrape_imdb(query)
-
-        if not imdb_data:
-            return jsonify({"error": "IMDb scraping failed"}), 500
-
-        data = imdb_data
-
-        # 2. Try to fill FileMoon URLs (this may replace placeholders)
-        print("Filling FileMoon URLs...")
-        try:
-            data = fill_filemoon_urls(data)
-        except Exception as e:
-            print(f"Error filling FileMoon URLs (continuing anyway): {e}")
-
-        # 3. STRICTLY keep only valid FileMoon /e/ episode URLs
-        data, removed_count, removed_items = remove_non_filemoon_episode_urls(data)
-        print(f"Filtered non-FileMoon/placeholder episodes before DB save. Removed {removed_count} episodes.")
-        if removed_count:
-            # optional: attach removed items for debugging (not saved to DB)
-            data['_removed_episodes'] = removed_items
-
-        # 4. Attach local subtitles if found
-        print("Checking for local subtitles...")
-        data = attach_local_subtitles(data, DOWNLOAD_DIR)
-
-        # Save to Database (defensive: do not save if seasons_data becomes empty entirely)
-        print(f"Saving to Database... Data keys: {list(data.keys())}")
-        if "show_title" in data:
-            print(f"Show Title to save: '{data['show_title']}'")
-
-        seasons_left = data.get("seasons_data", [])
-        if not seasons_left:
-            print("No valid episodes left after filtering. Aborting DB save.")
-            return jsonify({
-                "status": "failed",
-                "message": "No episodes with valid FileMoon /e/ URLs were found after processing.",
-                "removed_placeholder_episodes": removed_count,
-                "data_snapshot": {
-                    "show_title": data.get("show_title"),
-                    "seasons_count": 0
-                }
-            }), 200
-
-        try:
-            saved = db_utils.save_show_data(data)
-        except Exception as e:
-            print(f"Error saving to DB: {e}")
-            saved = False
-
-        if saved:
-            print(f"✅ Data saved to MongoDB database.")
-            return jsonify({
-                "status": "success",
-                "message": f"Data scraped and saved to database for '{query}'",
-                "removed_placeholder_episodes": removed_count,
-                "data": data
-            })
-        else:
-            return jsonify({"error": "Failed to save data to database"}), 500
-
+        metadata = movie_metadata.scrape_movie_metadata(data['name'], scrape_type="movie")
+        return jsonify({"status": "success", "data": metadata}), 200
     except Exception as e:
-        import traceback
-        traceback.print_exc()
-        return jsonify({"error": str(e)}), 500
+        return jsonify({"status": "error", "message": str(e)}), 500
 
-@app.route("/upload_to_filemoon", methods=["GET"])
-async def upload_endpoint():
-    result = await upload_local_files_to_filemoon()
-    return jsonify(result)
+@app.route('/scrape/series', methods=['POST'])
+def scrape_series():
+    data = request.get_json()
+    if not data or 'name' not in data:
+        return jsonify({"error": "Missing 'name' in body"}), 400
+    try:
+        metadata = movie_metadata.scrape_movie_metadata(data['name'], scrape_type="series")
+        return jsonify({"status": "success", "data": metadata}), 200
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
 
-@app.route("/shows", methods=["GET"])
-def get_shows():
-    shows = db_utils.get_all_shows()
-    return jsonify(shows)
+@app.route('/scrape/anime', methods=['POST'])
+def scrape_anime():
+    data = request.get_json()
+    if not data or 'name' not in data:
+        return jsonify({"error": "Missing 'name' in body"}), 400
+    try:
+        metadata = anime_metadata.scrape_anime_meta(data['name'])
+        return jsonify({"status": "success", "data": metadata}), 200
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
 
-@app.route("/shows/<path:title>", methods=["GET"])
-def get_show(title):
-    data = db_utils.get_show_data(title)
-    if not data:
-        data = db_utils.get_show_data(title.replace("_", " "))
-    if data:
-        return jsonify(data)
-    return jsonify({"error": "Show not found"}), 404
+@app.route('/db/collections', methods=['GET'])
+def get_db_collections():
+    """Get content from MongoDB collections."""
+    try:
+        client = db_utils.get_db_connection()
+        if not client: return jsonify({"error": "DB Connection failed"}), 500
+        
+        db = client[db_utils.DB_NAME]
+        
+        # Series
+        series_coll = db[db_utils.COLLECTION_NAME]
+        series = list(series_coll.find({}, {"show_title": 1, "created_at": 1, "_id": 0}).sort("show_title", 1))
+        
+        # Movies
+        movie_coll = db[db_utils.MOVIE_COLLECTION_NAME]
+        movies = list(movie_coll.find({}, {"title": 1, "created_at": 1, "_id": 0}).sort("title", 1))
+        
+        # Popular
+        popular = db_utils.get_popular_titles()
+        
+        return jsonify({"status": "success", "data": {"movies": movies, "series": series, "popular": popular}}), 200
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
 
-@app.route("/health", methods=["GET"])
-def health():
-    return jsonify({
-        "status": "healthy",
-        "filemoon_configured": filemoon_client is not None,
-        "ftp_configured": all([FTP_HOST, FTP_USER, FTP_PASS])
-    })
+@app.route('/db/popular', methods=['POST'])
+def add_popular():
+    data = request.get_json()
+    if not data or 'title' not in data:
+        return jsonify({"error": "Missing title"}), 400
+        
+    title = data['title']
+    category = data.get('category', 'movie')
+    
+    res = db_utils.add_popular_title(title, category)
+    if res:
+         return jsonify({"status": "success", "id": res}), 200
+    elif res is False:
+         return jsonify({"status": "error", "message": "Already exists"}), 400
+    else:
+         return jsonify({"status": "error", "message": "Failed to add"}), 500
 
-if __name__ == "__main__":
-    print("🚀 Starting Unified Server on port 5014...")
-    print("📦 Initializing Database...")
-    db_utils.init_db()
-    print("📡 IMDb Scraper API: http://localhost:5014/scrape_imdb?query=SHOW_NAME")
-    print("📤 FileMoon Upload API: http://localhost:5014/upload_to_filemoon")
-    app.run(debug=False, host='0.0.0.0', port=5014)
+@app.route('/db/popular/<item_id>', methods=['DELETE'])
+def delete_popular(item_id):
+    res = db_utils.remove_popular_title(item_id)
+    if res:
+        return jsonify({"status": "success", "message": "Deleted"}), 200
+    else:
+        return jsonify({"status": "error", "message": "Failed to delete"}), 500
+
+@app.route('/db/popular/reorder', methods=['PUT'])
+def reorder_popular():
+    data = request.get_json()
+    if not data or 'ids' not in data:
+        return jsonify({"error": "Missing 'ids' array"}), 400
+    
+    ids = data['ids']
+    if not isinstance(ids, list):
+        return jsonify({"error": "'ids' must be an array"}), 400
+    
+    res = db_utils.reorder_popular_titles(ids)
+    if res:
+        return jsonify({"status": "success", "message": "Reordered"}), 200
+    else:
+        return jsonify({"status": "error", "message": "Failed to reorder"}), 500
+
+@app.route('/uploads/all', methods=['GET'])
+def get_all_uploads():
+    """Get all uploads from CSV."""
+    csv_path = "filemoon_files.csv"
+    if not os.path.exists(csv_path):
+        return jsonify({"status": "success", "data": []}), 200
+    
+    try:
+        entries = []
+        import csv
+        with open(csv_path, 'r', encoding='utf-8') as f:
+            reader = csv.DictReader(f)
+            entries = list(reader)
+            
+        # Return all, newest first
+        all_entries = entries[::-1]
+        return jsonify({"status": "success", "data": all_entries}), 200
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+@app.route('/process/mkv', methods=['POST'])
+def process_mkv():
+    """
+    Trigger the MKV muxing and organization process.
+    Uses hardcoded paths in mkv.py effectively, or we can look to make it dynamic if needed.
+    For now, calling mkv.main() as requested to not change code heavily.
+    """
+    try:
+        # mkv.main() processes files from /home/jegan/Desktop/movie/tele-scrape/movie
+        # and moves to /home/jegan/Desktop/movie/tele-scrape/downloads
+        mkv.main()
+        return jsonify({"status": "success", "message": "MKV processing cycle completed."}), 200
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+@app.route('/download/subtitles', methods=['POST'])
+def download_subtitles():
+    """
+    Download subtitles for a specific movie.
+    Body: { "movie_name": "Inception", "download_dir": "/optional/path" }
+    """
+    data = request.get_json()
+    if not data or 'movie_name' not in data:
+        return jsonify({"error": "Missing 'movie_name' in body"}), 400
+    
+    movie_name = data['movie_name']
+    download_dir = data.get('download_dir', os.getcwd())
+    
+    try:
+        path = Path(download_dir)
+        subtitle_path = subtitle_downloader.download_subtitle(movie_name, path)
+        if subtitle_path:
+            return jsonify({"status": "success", "file": str(subtitle_path)}), 200
+        else:
+            return jsonify({"status": "error", "message": "Subtitle download failed"}), 404
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+import threading
+
+# Global state for upload progress
+upload_status = {
+    "is_uploading": False,
+    "current_file": "",
+    "current_index": 0,
+    "total_files": 0,
+    "current_file_percent": 0,
+    "results": []
+}
+
+def run_upload_task(skip_subtitles, delete_after):
+    global upload_status
+    upload_status["is_uploading"] = True
+    upload_status["results"] = []
+    
+    try:
+        FILEMOON_API_KEY = os.getenv("FILEMOON_API_KEY")
+        MOVIE_DIR = movie_uploader.MOVIE_DIR
+        filemoon = FileMoon(FILEMOON_API_KEY)
+        ftp_creds = movie_uploader.get_ftp_credentials()
+        
+        video_files = movie_uploader.get_all_video_files(MOVIE_DIR)
+        upload_status["total_files"] = len(video_files)
+        
+        for idx, video_file in enumerate(video_files):
+            upload_status["current_index"] = idx + 1
+            upload_status["current_file"] = video_file
+            upload_status["current_file_percent"] = 0
+            
+            # Absolute path for recursive uploads
+            video_path = os.path.join(MOVIE_DIR, video_file)
+            
+            def progress_cb(current, total, fname):
+                upload_status["current_file_percent"] = round((current / total) * 100, 1)
+
+            file_code = movie_uploader.upload_video_to_filemoon(
+                filemoon, video_path, ftp_creds, progress_callback=progress_cb
+            )
+            
+            result = {"file": video_file, "uploaded": False, "file_code": None, "subtitle_uploaded": False}
+            
+            if file_code:
+                result["uploaded"] = True
+                result["file_code"] = file_code
+                movie_uploader.update_csv(video_file, file_code)
+                
+                if not skip_subtitles:
+                    subtitle_path = movie_uploader.find_subtitle_for_video(video_path)
+                    if subtitle_path:
+                        sub_success = movie_uploader.upload_subtitle_for_video(video_file, subtitle_path)
+                        result["subtitle_uploaded"] = sub_success
+                        if sub_success and delete_after:
+                             try:
+                                 os.remove(subtitle_path)
+                                 print(f"🗑️ Deleted subtitle: {subtitle_path}")
+                             except Exception as e:
+                                 print(f"⚠️ Failed to delete sub {subtitle_path}: {e}")
+                
+                if delete_after:
+                    try:
+                        os.remove(video_path)
+                        print(f"🗑️ Deleted video: {video_path}")
+                    except Exception as e:
+                        print(f"⚠️ Failed to delete video {video_path}: {e}")
+            
+            upload_status["results"].append(result)
+            
+    except Exception as e:
+        print(f"Error in upload thread: {e}")
+    finally:
+        upload_status["is_uploading"] = False
+
+@app.route('/upload/movies', methods=['POST'])
+def upload_movies():
+    """
+    Trigger upload in a background thread.
+    """
+    if upload_status["is_uploading"]:
+        return jsonify({"status": "error", "message": "Upload already in progress"}), 400
+        
+    data = request.get_json() or {}
+    skip_subtitles = data.get('skip_subtitles', False)
+    # Default to True as requested
+    delete_after = data.get('delete_after', True)
+    
+    thread = threading.Thread(target=run_upload_task, args=(skip_subtitles, delete_after))
+    thread.start()
+    
+    return jsonify({"status": "success", "message": "Upload started in background"}), 202
+
+@app.route('/upload/status', methods=['GET'])
+def get_upload_status():
+    """
+    Polling endpoint for upload progress.
+    """
+    return jsonify(upload_status), 200
+
+
+
+@app.route('/update/csv', methods=['POST'])
+def trigger_update_csv():
+    """
+    Update the local CSV with data from FileMoon.
+    """
+    try:
+        update_csv.main()
+        return jsonify({"status": "success", "message": "CSV updated"}), 200
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+if __name__ == '__main__':
+    # Run on 0.0.0.0 to be accessible, port 5000 default
+    app.run(host='0.0.0.0', port=5000, debug=True)

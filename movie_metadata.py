@@ -54,7 +54,7 @@ def setup_driver():
     print("Chrome driver setup successful.")
     return driver
 
-def scrape_movie_metadata(movie_name):
+def scrape_movie_metadata(movie_name, scrape_type="movie"):
     driver = setup_driver()
     metadata = {}
     try:
@@ -69,7 +69,7 @@ def scrape_movie_metadata(movie_name):
         
         from selenium.webdriver.common.keys import Keys
 
-        def perform_search_and_select(query_name):
+        def perform_search_and_select(query_name, force_type=None):
             print(f"Searching for '{query_name}'...")
             search_input.clear()
             search_input.send_keys(query_name)
@@ -88,9 +88,9 @@ def scrape_movie_metadata(movie_name):
             
             target_item = None
             
-            # Determine preference based on query
-            prefer_type = "movie"
-            if "anime" in movie_name.lower():
+            # Determine preference based on query or force_type
+            prefer_type = force_type if force_type else "movie"
+            if not force_type and "anime" in movie_name.lower():
                 prefer_type = "series" # Anime is usually classified as series
             
             print(f"Preferring type: {prefer_type}")
@@ -105,8 +105,8 @@ def scrape_movie_metadata(movie_name):
                     
                     print(f"Result {i}: Name='{item_name}', Type='{item_type}', Year='{item_year}'")
                     
-                    # Strict filtering: If we want a movie, IGNORE series results completely
-                    if prefer_type == "movie" and item_type == "series":
+                    # Strict filtering: If we want a specific type, IGNORE other types
+                    if prefer_type and item_type != prefer_type:
                         print(f"Skipping result {i} (Type='{item_type}') because we want '{prefer_type}'")
                         continue
 
@@ -116,6 +116,7 @@ def scrape_movie_metadata(movie_name):
                         target_item = res
                         print("✅ Found exact preferred match!")
                         break
+
                     
                     # Fallback: exact match, SAME type (limit fallback to same type)
                     if item_name.lower() == query_name.lower() and target_item is None and item_type == prefer_type:
@@ -149,14 +150,14 @@ def scrape_movie_metadata(movie_name):
                 return False
 
         # Attempt 1: Original name
-        if not perform_search_and_select(movie_name):
+        if not perform_search_and_select(movie_name, force_type=scrape_type):
             # Attempt 2: Strip year if present
             # Regex to find (YYYY) or just YYYY at the end
             cleaned_name = re.sub(r'\s*\(?\d{4}\)?$', '', movie_name)
             
             if cleaned_name != movie_name and len(cleaned_name) > 2:
                 print(f"⚠️ Initial search failed. Retrying with year stripped: '{cleaned_name}'")
-                if not perform_search_and_select(cleaned_name):
+                if not perform_search_and_select(cleaned_name, force_type=scrape_type):
                      print(f"❌ Retry failed for '{cleaned_name}'. Aborting.")
                      return None
             else:

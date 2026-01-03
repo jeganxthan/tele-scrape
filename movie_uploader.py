@@ -18,7 +18,7 @@ from fileMoon import FileMoon
 load_dotenv()
 
 # Configuration
-MOVIE_DIR = os.path.join(os.getcwd(), "movie")
+MOVIE_DIR = os.path.join(os.getcwd(), "downloads")
 FILEMOON_API_KEY = os.getenv("FILEMOON_API_KEY")
 # Support both naming conventions
 FILEMOON_FTP_HOST = os.getenv("FILEMOON_FTP_HOST") or os.getenv("FTP_HOST", "ftp.filemoon.sx")
@@ -64,7 +64,7 @@ def find_subtitle_for_video(video_path):
     
     return None
 
-def upload_video_to_filemoon(filemoon_client, video_path, ftp_creds):
+def upload_video_to_filemoon(filemoon_client, video_path, ftp_creds, progress_callback=None):
     """Upload video file to FileMoon via FTP"""
     filename = os.path.basename(video_path)
     file_size = os.path.getsize(video_path)
@@ -78,12 +78,14 @@ def upload_video_to_filemoon(filemoon_client, video_path, ftp_creds):
     # Remote path on FTP server
     remote_path = f"/{filename}"
     
-    # Progress callback
-    def progress_callback(current, total, fname):
+    # Default Progress callback if none provided
+    def default_progress_callback(current, total, fname):
         percent = (current / total) * 100
         mb_current = current / (1024 * 1024)
         mb_total = total / (1024 * 1024)
         print(f"\r⏳ Progress: {percent:.1f}% ({mb_current:.1f}/{mb_total:.1f} MB)", end='', flush=True)
+        if progress_callback:
+            progress_callback(current, total, fname)
     
     try:
         success = filemoon_client.ftp_upload(
@@ -92,7 +94,7 @@ def upload_video_to_filemoon(filemoon_client, video_path, ftp_creds):
             ftp_user=ftp_creds['user'],
             ftp_pass=ftp_creds['pass'],
             remote_file_path=remote_path,
-            progress_callback=progress_callback
+            progress_callback=default_progress_callback
         )
         
         print()  # New line after progress
@@ -100,20 +102,27 @@ def upload_video_to_filemoon(filemoon_client, video_path, ftp_creds):
         if success:
             print(f"✅ Video uploaded successfully!")
             
-            # Wait for FileMoon to process the file
-            print("⏳ Waiting for FileMoon to process the file...")
-            time.sleep(10)
+            # Wait for FileMoon to process the file (indexing delay)
+            print("⏳ Waiting 15s for FileMoon to index the file...")
+            time.sleep(15)
             
-            # Get file info to retrieve file code
-            file_list = filemoon_client.f_list(name=filename)
-            if file_list.get('result') and file_list['result'].get('files'):
-                files = file_list['result']['files']
-                if files:
-                    file_code = files[0].get('file_code')
-                    print(f"✅ File code: {file_code}")
-                    return file_code
+            # Retry loop to get file info (FileMoon API can be slow to reflect new uploads)
+            for attempt in range(3):
+                print(f"🔍 Retrieval attempt {attempt + 1}/3...")
+                file_list = filemoon_client.f_list(name=filename)
+                if file_list.get('result') and file_list['result'].get('files'):
+                    files = file_list['result']['files']
+                    # Sort by created if multiple found, or just take first
+                    if files:
+                        file_code = files[0].get('file_code')
+                        print(f"✅ File code retrieved: {file_code}")
+                        return file_code
+                
+                if attempt < 2:
+                    print("⚠️ Not found yet, waiting 10s before retry...")
+                    time.sleep(10)
             
-            print("⚠️ File uploaded but couldn't retrieve file code")
+            print("❌ Failed to retrieve file code after multiple attempts.")
             return None
         else:
             print(f"❌ Upload failed")
@@ -193,6 +202,17 @@ def upload_subtitle_for_video(video_filename, subtitle_path):
         print(f"❌ Error uploading subtitle: {e}")
         return False
 
+def get_all_video_files(directory):
+    """Find all video files in a directory recursively"""
+    video_files = []
+    for root, dirs, files in os.walk(directory):
+        for file in files:
+            if file.lower().endswith(VIDEO_EXTENSIONS):
+                # We store the relative path from the directory to keep it clean
+                rel_path = os.path.relpath(os.path.join(root, file), directory)
+                video_files.append(rel_path)
+    return video_files
+
 def main():
     import argparse
     parser = argparse.ArgumentParser(description="Upload movies and subtitles to FileMoon")
@@ -232,14 +252,11 @@ def main():
     
     print(f"✅ FTP Host: {ftp_creds['host']}")
     
-    # Get list of video files
-    video_files = [
-        f for f in os.listdir(MOVIE_DIR)
-        if f.lower().endswith(VIDEO_EXTENSIONS)
-    ]
+    # Get list of video files recursively
+    video_files = get_all_video_files(MOVIE_DIR)
     
     if not video_files:
-        print("⚠️ No video files found in movie directory")
+        print(f"⚠️ No video files found in {MOVIE_DIR}")
         return
     
     print(f"\n📁 Found {len(video_files)} video file(s)")

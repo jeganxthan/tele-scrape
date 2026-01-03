@@ -1,0 +1,54 @@
+# API Endpoints for Tele-Scrape Server
+
+Base URL: http://localhost:5000
+
+## 1. Health Check
+Check if server is running.
+```bash
+curl -X GET http://localhost:5000/health
+```
+
+## 2. Scrape Movie Metadata
+Scrapes metadata for a given movie name from Stremio staging.
+```bash
+curl -X POST http://localhost:5000/scrape/metadata \
+     -H "Content-Type: application/json" \
+     -d '{"movie_name": "Inception"}'
+```
+
+## 3. Process MKV Files
+Triggers the `mkv.py` logic: Muxes MP4+SRT in the `movie/` folder into MKV, and moves them to `downloads/`.
+```bash
+curl -X POST http://localhost:5000/process/mkv
+```
+
+## 4. Download Subtitles
+Downloads subtitles for a movie to the server's current directory (or specified path).
+```bash
+curl -X POST http://localhost:5000/download/subtitles \
+     -H "Content-Type: application/json" \
+     -d '{"movie_name": "Joker"}'
+```
+
+## 5. Upload Movies to FileMoon
+Uploads all videos from the `movie/` directory to FileMoon via FTP, updates CSV, and uploads subtitles if present.
+Options: `skip_subtitles` (bool), `delete_after` (bool - deletes local files on success).
+```bash
+curl -X POST http://localhost:5000/upload/movies \
+     -H "Content-Type: application/json" \
+     -d '{"delete_after": false}'
+```
+
+## 6. Upload Single Subtitle
+Uploads a specific subtitle file for a video that matches a filename in `filemoon_files.csv`.
+```bash
+curl -X POST http://localhost:5000/upload/subtitle-single \
+     -H "Content-Type: application/json" \
+     -d '{"video_filename": "movie.mp4", "subtitle_path": "/absolute/path/to/sub.srt"}'
+```
+
+## 7. Update CSV
+Fetches the latest file list from FileMoon and updates `filemoon_files.csv`.
+```bash
+curl -X POST http://localhost:5000/update/csv
+```

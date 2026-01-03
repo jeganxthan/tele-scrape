@@ -305,3 +305,92 @@ def update_episode_data(show_title, season_num, episode_num, updates):
     except Exception as e:
         print(f"❌ Failed to update episode data: {e}")
         return False
+
+# ---------------- Popular Titles Management ----------------
+POPULAR_COLLECTION_NAME = "popular_titles"
+
+from bson.objectid import ObjectId
+
+def get_popular_titles():
+    """Retrieves all popular titles sorted by order."""
+    client = get_db_connection()
+    if not client: return []
+    
+    try:
+        db = client[DB_NAME]
+        collection = db[POPULAR_COLLECTION_NAME]
+        # Return list with _id as string, sorted by order
+        docs = list(collection.find({}).sort("order", 1))
+        for d in docs:
+            d['id'] = str(d['_id'])
+            del d['_id']
+        return docs
+    except Exception as e:
+        print(f"❌ Failed to get popular titles: {e}")
+        return []
+
+def add_popular_title(title, category="movie"):
+    """Adds a title to popular collection with auto-incremented order."""
+    client = get_db_connection()
+    if not client: return None
+    
+    try:
+        db = client[DB_NAME]
+        collection = db[POPULAR_COLLECTION_NAME]
+        
+        # Check duplicate
+        if collection.find_one({"title": title}):
+            return False # Already exists
+        
+        # Get max order and increment
+        max_doc = collection.find_one(sort=[("order", -1)])
+        next_order = (max_doc.get("order", -1) + 1) if max_doc else 0
+            
+        res = collection.insert_one({
+            "title": title,
+            "category": category,
+            "order": next_order,
+            "added_at": datetime.datetime.utcnow()
+        })
+        return str(res.inserted_id)
+    except Exception as e:
+        print(f"❌ Failed to add popular title: {e}")
+        return None
+
+def remove_popular_title(doc_id):
+    """Removes a title by ID."""
+    client = get_db_connection()
+    if not client: return False
+    
+    try:
+        db = client[DB_NAME]
+        collection = db[POPULAR_COLLECTION_NAME]
+        
+        res = collection.delete_one({"_id": ObjectId(doc_id)})
+        return res.deleted_count > 0
+    except Exception as e:
+        print(f"❌ Failed to remove popular title: {e}")
+        return False
+
+def reorder_popular_titles(ordered_ids):
+    """Reorders popular titles based on provided ID array."""
+    client = get_db_connection()
+    if not client: return False
+    
+    try:
+        db = client[DB_NAME]
+        collection = db[POPULAR_COLLECTION_NAME]
+        
+        # Update each document with its new order
+        for index, doc_id in enumerate(ordered_ids):
+            collection.update_one(
+                {"_id": ObjectId(doc_id)},
+                {"$set": {"order": index}}
+            )
+        
+        print(f"✅ Reordered {len(ordered_ids)} popular titles")
+        return True
+    except Exception as e:
+        print(f"❌ Failed to reorder popular titles: {e}")
+        return False
+
